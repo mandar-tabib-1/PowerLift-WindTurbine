@@ -3,6 +3,8 @@ Wind Turbine Multi-Agent Orchestrator - GUI Version
 
 A Streamlit-based graphical interface for the wind turbine analysis system.
 Run with: streamlit run wind_turbine_gui.py
+
+& ".\.venv\Scripts\python.exe" -m streamlit run wind_turbine_gui.py --server.port 8505
 """
 
 import streamlit as st
@@ -13,6 +15,7 @@ from matplotlib.colors import Normalize
 import time
 import os
 import sys
+import torch
 from pathlib import Path
 from datetime import datetime
 
@@ -75,6 +78,53 @@ if 'results' not in st.session_state:
     st.session_state.results = None
 if 'agents_initialized' not in st.session_state:
     st.session_state.agents_initialized = False
+
+
+# =============================================================================
+# Norwegian Wind Farms Database
+# =============================================================================
+NORWEGIAN_WIND_FARMS = {
+    "Bessaker Wind Farm": {
+        "location": "Bessakerfjellet, Åfjord, Trøndelag",
+        "latitude": 64.1833,
+        "longitude": 10.1167,
+        "capacity_mw": 57.5,
+        "turbines": 25,
+        "description": "Located at Bessakerfjellet in Åfjord municipality, featuring 25 Enercon E-70 turbines."
+    },
+    "Tonstad Wind Farm": {
+        "location": "Sirdal, Agder",
+        "latitude": 58.6667,
+        "longitude": 6.7333,
+        "capacity_mw": 208,
+        "turbines": 51,
+        "description": "One of Norway's largest onshore wind farms, located in Southern Norway."
+    },
+    "Smøla Wind Farm": {
+        "location": "Smøla, Møre og Romsdal",
+        "latitude": 63.4000,
+        "longitude": 8.0167,
+        "capacity_mw": 150,
+        "turbines": 68,
+        "description": "One of Norway's oldest and largest wind farms, operational since 2002."
+    },
+    "Roan Wind Farm": {
+        "location": "Roan, Trøndelag",
+        "latitude": 64.1500,
+        "longitude": 10.3000,
+        "capacity_mw": 255.6,
+        "turbines": 71,
+        "description": "Part of the Fosen Vind project, one of Europe's largest onshore wind farms."
+    },
+    "Raggovidda Wind Farm": {
+        "location": "Berlevåg, Finnmark",
+        "latitude": 70.5333,
+        "longitude": 29.1000,
+        "capacity_mw": 45,
+        "turbines": 15,
+        "description": "Norway's northernmost wind farm, located above the Arctic Circle."
+    },
+}
 
 
 # =============================================================================
@@ -160,6 +210,55 @@ def fetch_weather(city: str, country: str):
         }
 
 
+def fetch_weather_for_farm(farm_name: str, farm_info: dict):
+    """Fetch weather data for a specific Norwegian wind farm."""
+    import requests
+    
+    lat = farm_info["latitude"]
+    lon = farm_info["longitude"]
+    location = f"{farm_name}, {farm_info['location']}"
+    
+    # Weather data from Open-Meteo
+    try:
+        api_base = "https://api.open-meteo.com/v1/forecast"
+        response = requests.get(
+            api_base,
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "current": "temperature_2m,wind_speed_10m,wind_direction_10m,weather_code",
+                "wind_speed_unit": "ms"
+            },
+            timeout=10
+        )
+        data = response.json()
+        current = data.get("current", {})
+        
+        return {
+            "location": location,
+            "latitude": lat,
+            "longitude": lon,
+            "wind_speed_ms": current.get("wind_speed_10m", 8.5),
+            "wind_direction_deg": current.get("wind_direction_10m", 275),
+            "temperature_c": current.get("temperature_2m", 5),
+            "data_source": "Open-Meteo API (Live)",
+            "farm_name": farm_name
+        }
+    except Exception as e:
+        # Simulated data based on typical Norwegian coastal conditions
+        np.random.seed(int(datetime.now().timestamp()) % 1000 + hash(farm_name) % 100)
+        return {
+            "location": location,
+            "latitude": lat,
+            "longitude": lon,
+            "wind_speed_ms": np.random.uniform(7, 14),  # Norwegian wind farms typically have good wind
+            "wind_direction_deg": np.random.uniform(250, 320),  # Predominantly westerly winds
+            "temperature_c": np.random.uniform(-5, 15),  # Norwegian temperatures
+            "data_source": "Simulated Data",
+            "farm_name": farm_name
+        }
+
+
 # =============================================================================
 # Expert Agent Functions
 # =============================================================================
@@ -176,47 +275,602 @@ def get_expert_recommendation(wind_speed: float, wind_direction: float):
         "cut_out_wind_speed_ms": 25.0
     }
     
-    yaw_min, yaw_max = 272, 285
-    reasoning = []
+    # ROM model constraints (CFD training data range)
+    rom_yaw_min, rom_yaw_max = 272, 285
     
-    # Determine operating region
+    # Actual real-world recommendation
+    actual_yaw = wind_direction  # In reality, turbine aligns with wind
+    actual_pitch = 0.0  # Normal operating pitch (fine pitch)
+    
+    reasoning = []
+    actual_recommendation = ""
+    rom_explanation = ""
+    
+    # Determine operating region and actual recommendation
     if wind_speed < turbine_specs["cut_in_wind_speed_ms"]:
         operating_region = "Below Cut-in"
+        actual_pitch = 90.0  # Feathered position
+        actual_recommendation = (
+            f"**Actual Real-World Recommendation:** At wind speed of {wind_speed:.1f} m/s (below cut-in of "
+            f"{turbine_specs['cut_in_wind_speed_ms']} m/s), the turbine should enter standby/idle mode. "
+            f"The recommended yaw angle is {wind_direction:.1f}° (aligned with wind direction) to be ready "
+            f"when wind increases. Blade pitch should be feathered to ~90° to minimize rotor rotation and "
+            f"reduce mechanical wear on bearings and gearbox. The generator remains disconnected from the grid."
+        )
         reasoning.append(f"Wind speed ({wind_speed:.1f} m/s) is below cut-in speed ({turbine_specs['cut_in_wind_speed_ms']} m/s)")
-        suggested_yaw = (yaw_min + yaw_max) / 2
+        reasoning.append("Turbine enters standby mode - no power generation")
+        reasoning.append(f"Actual recommendation: Yaw = {wind_direction:.1f}°, Pitch = 90° (feathered)")
+        
     elif wind_speed > turbine_specs["cut_out_wind_speed_ms"]:
         operating_region = "Above Cut-out"
+        actual_pitch = 90.0  # Feathered for protection
+        actual_recommendation = (
+            f"**Actual Real-World Recommendation:** At wind speed of {wind_speed:.1f} m/s (above cut-out of "
+            f"{turbine_specs['cut_out_wind_speed_ms']} m/s), the turbine should shut down for safety. "
+            f"Blades should be feathered to 90° to reduce loads. The nacelle may yaw out of the wind "
+            f"or remain aligned depending on the control strategy."
+        )
         reasoning.append(f"Wind speed ({wind_speed:.1f} m/s) exceeds cut-out speed")
-        suggested_yaw = (yaw_min + yaw_max) / 2
+        reasoning.append("Emergency shutdown - blades feathered for protection")
+        
     elif wind_speed <= turbine_specs["rated_wind_speed_ms"]:
         operating_region = "Partial Load (Region 2)"
+        actual_pitch = 0.0  # Fine pitch for max power capture
+        actual_recommendation = (
+            f"**Actual Real-World Recommendation:** At wind speed of {wind_speed:.1f} m/s (partial load region), "
+            f"the turbine should align precisely with the wind direction at {wind_direction:.1f}°. "
+            f"Blade pitch should be at fine pitch (~0°) to maximize aerodynamic torque and energy capture. "
+            f"In this region, even small yaw misalignments significantly reduce power output (power ∝ cos³(misalignment))."
+        )
         reasoning.append("Operating in partial load region - maximize energy capture")
-        reasoning.append("Aligning yaw closely with wind direction is critical")
-        ideal_yaw = wind_direction
-        suggested_yaw = np.clip(ideal_yaw, yaw_min, yaw_max)
-        if ideal_yaw < yaw_min:
-            reasoning.append(f"Wind direction below yaw range - using minimum {yaw_min}°")
-        elif ideal_yaw > yaw_max:
-            reasoning.append(f"Wind direction above yaw range - using maximum {yaw_max}°")
-        else:
-            reasoning.append(f"Aligning with wind direction at {suggested_yaw:.1f}°")
+        reasoning.append(f"Actual recommendation: Yaw = {wind_direction:.1f}°, Pitch = 0° (fine pitch)")
+        
     else:
         operating_region = "Full Load (Region 3)"
-        reasoning.append("Operating in full load region")
-        reasoning.append("Applying wake steering offset for downstream benefit")
-        ideal_yaw = wind_direction + 3
-        suggested_yaw = np.clip(ideal_yaw, yaw_min, yaw_max)
+        actual_pitch = 10.0  # Pitched to limit power
+        actual_recommendation = (
+            f"**Actual Real-World Recommendation:** At wind speed of {wind_speed:.1f} m/s (above rated), "
+            f"the turbine operates at full load. Yaw should align with wind at {wind_direction:.1f}°. "
+            f"Blade pitch increases (typically 10-25°) to shed excess power and maintain rated output of "
+            f"{turbine_specs['rated_power_mw']} MW. Wake steering may apply a small intentional yaw offset "
+            f"(+3-5°) to benefit downstream turbines in a wind farm."
+        )
+        reasoning.append("Operating in full load region - pitch to limit power")
+        reasoning.append(f"Actual recommendation: Yaw = {wind_direction:.1f}°, Pitch = ~10-25°")
     
-    yaw_misalignment = abs(suggested_yaw - wind_direction)
-    expected_efficiency = np.cos(np.radians(yaw_misalignment)) ** 3
+    # Select yaw for ROM testing (constrained to training data range)
+    rom_yaw = np.clip(wind_direction, rom_yaw_min, rom_yaw_max)
+    
+    # Calculate efficiency deviation due to ROM constraint
+    yaw_misalignment = abs(rom_yaw - wind_direction)
+    rom_efficiency = np.cos(np.radians(yaw_misalignment)) ** 3
+    ideal_efficiency = 1.0  # 100% when perfectly aligned
+    efficiency_deviation = (ideal_efficiency - rom_efficiency) * 100
+    
+    # ROM explanation
+    rom_explanation = (
+        f"**For ROM Testing:** The Reduced Order Model was trained on high-fidelity CFD simulations "
+        f"with yaw angles between {rom_yaw_min}° and {rom_yaw_max}°. This range was selected because: "
+        f"(1) It represents typical westerly wind conditions at Norwegian wind farms, "
+        f"(2) CFD simulations are computationally expensive (~1000+ CPU-hours each), so only a representative "
+        f"parameter range was simulated, and (3) This range captures the key wake dynamics for yaw-based control studies. "
+        f"The ROM test yaw is set to {rom_yaw:.1f}°, which deviates {yaw_misalignment:.1f}° from the actual wind direction. "
+        f"This results in an efficiency of {rom_efficiency*100:.1f}% compared to perfect alignment, "
+        f"representing a {efficiency_deviation:.1f}% power loss due to this constraint."
+    )
     
     return {
-        "suggested_yaw": suggested_yaw,
+        "suggested_yaw": rom_yaw,  # For ROM testing
+        "actual_yaw": actual_yaw,  # Real-world recommendation
+        "actual_pitch": actual_pitch,
         "yaw_misalignment": yaw_misalignment,
-        "expected_efficiency": expected_efficiency,
+        "expected_efficiency": rom_efficiency,
+        "efficiency_deviation": efficiency_deviation,
         "operating_region": operating_region,
         "reasoning": reasoning,
+        "actual_recommendation": actual_recommendation,
+        "rom_explanation": rom_explanation,
+        "rom_yaw_range": (rom_yaw_min, rom_yaw_max),
         "turbine_specs": turbine_specs
+    }
+
+
+# =============================================================================
+# Yaw Misalignment <-> Nacelle Direction Conversion Functions
+# =============================================================================
+def yaw_misalignment_to_nacelle_direction(yaw_misalignment: float) -> float:
+    """
+    Convert yaw misalignment angle to nacelle direction for ML model input.
+    
+    The ML models are trained with:
+    - 270° nacelle direction = 0° yaw misalignment (aligned with wind)
+    - 285° nacelle direction = 15° yaw misalignment
+    
+    Parameters:
+    -----------
+    yaw_misalignment : float
+        Yaw misalignment angle in degrees (0 to 15)
+    
+    Returns:
+    --------
+    float
+        Nacelle direction in degrees (270 to 285)
+    """
+    return 270.0 + yaw_misalignment
+
+
+def nacelle_direction_to_yaw_misalignment(nacelle_direction: float) -> float:
+    """
+    Convert nacelle direction to yaw misalignment angle.
+    
+    Parameters:
+    -----------
+    nacelle_direction : float
+        Nacelle direction in degrees (270 to 285)
+    
+    Returns:
+    --------
+    float
+        Yaw misalignment angle in degrees (0 to 15)
+    """
+    return nacelle_direction - 270.0
+
+
+# =============================================================================
+# Two-Turbine Wake Steering Optimizer (Gradient-Based with PyTorch AD)
+# =============================================================================
+# Differentiable ML Surrogate for True AD through ML Models
+# =============================================================================
+class DifferentiablePowerSurrogate(torch.nn.Module):
+    """
+    A differentiable surrogate model for power prediction.
+    
+    This model fits a polynomial/RBF approximation to the GP model's predictions,
+    enabling true automatic differentiation through the ML model.
+    """
+    def __init__(self, power_agent, yaw_range=(270.0, 285.0), n_fit_points=16):
+        super().__init__()
+        
+        # Sample the GP model at multiple yaw angles
+        yaw_samples = np.linspace(yaw_range[0], yaw_range[1], n_fit_points)
+        power_samples = []
+        
+        for yaw in yaw_samples:
+            result = power_agent.predict(yaw_angle=yaw, n_time_points=50, return_samples=False)
+            power_samples.append(np.mean(result['power_mean_MW']))
+        
+        self.yaw_samples = torch.tensor(yaw_samples, dtype=torch.float64)
+        self.power_samples = torch.tensor(power_samples, dtype=torch.float64)
+        
+        # Fit a polynomial (degree 3) to the GP predictions
+        # P(γ) = a₀ + a₁γ + a₂γ² + a₃γ³
+        # Normalize yaw to [0, 1] for numerical stability
+        self.yaw_min = yaw_range[0]
+        self.yaw_max = yaw_range[1]
+        
+        yaw_norm = (self.yaw_samples - self.yaw_min) / (self.yaw_max - self.yaw_min)
+        
+        # Solve for polynomial coefficients using least squares
+        A = torch.stack([torch.ones_like(yaw_norm), yaw_norm, yaw_norm**2, yaw_norm**3], dim=1)
+        self.coeffs = torch.linalg.lstsq(A, self.power_samples).solution
+        
+    def forward(self, nacelle_direction):
+        """
+        Compute power for a given nacelle direction (differentiable).
+        
+        Args:
+            nacelle_direction: torch.Tensor, nacelle direction in degrees (270-285)
+            
+        Returns:
+            power: torch.Tensor, predicted power in MW
+        """
+        # Normalize input
+        yaw_norm = (nacelle_direction - self.yaw_min) / (self.yaw_max - self.yaw_min)
+        
+        # Polynomial evaluation (differentiable)
+        power = (self.coeffs[0] + 
+                 self.coeffs[1] * yaw_norm + 
+                 self.coeffs[2] * yaw_norm**2 + 
+                 self.coeffs[3] * yaw_norm**3)
+        
+        return power
+
+
+class DifferentiableWakeSurrogate(torch.nn.Module):
+    """
+    A differentiable surrogate model for wake deficit prediction.
+    
+    This model fits an approximation to the TT-OpInf model's wake deficit,
+    enabling true automatic differentiation through the ML model.
+    """
+    def __init__(self, wake_agent, yaw_range=(270.0, 285.0), n_fit_points=8, 
+                 freestream_velocity=8.5):
+        super().__init__()
+        
+        self.freestream = freestream_velocity
+        
+        # Sample the TT-OpInf model at multiple yaw angles
+        yaw_samples = np.linspace(yaw_range[0], yaw_range[1], n_fit_points)
+        deficit_samples = []
+        
+        for yaw in yaw_samples:
+            predictions, _ = wake_agent.predict(
+                yaw_angle=yaw, n_timesteps=30, export_vtk=False, verbose=False
+            )
+            velocity_mag = np.linalg.norm(predictions, axis=2)
+            mean_velocity = np.mean(velocity_mag)
+            deficit = 1.0 - (mean_velocity / freestream_velocity)
+            deficit_samples.append(np.clip(deficit, 0, 0.5))
+        
+        self.yaw_samples = torch.tensor(yaw_samples, dtype=torch.float64)
+        self.deficit_samples = torch.tensor(deficit_samples, dtype=torch.float64)
+        
+        # Fit a polynomial to the wake deficit
+        self.yaw_min = yaw_range[0]
+        self.yaw_max = yaw_range[1]
+        
+        yaw_norm = (self.yaw_samples - self.yaw_min) / (self.yaw_max - self.yaw_min)
+        
+        # Quadratic fit for wake deficit
+        A = torch.stack([torch.ones_like(yaw_norm), yaw_norm, yaw_norm**2], dim=1)
+        self.coeffs = torch.linalg.lstsq(A, self.deficit_samples).solution
+        
+    def forward(self, nacelle_direction):
+        """
+        Compute wake deficit for a given nacelle direction (differentiable).
+        
+        Args:
+            nacelle_direction: torch.Tensor, nacelle direction in degrees (270-285)
+            
+        Returns:
+            deficit: torch.Tensor, wake deficit (0 to 0.5)
+        """
+        yaw_norm = (nacelle_direction - self.yaw_min) / (self.yaw_max - self.yaw_min)
+        
+        deficit = (self.coeffs[0] + 
+                   self.coeffs[1] * yaw_norm + 
+                   self.coeffs[2] * yaw_norm**2)
+        
+        return torch.clamp(deficit, 0.0, 0.5)
+
+
+# =============================================================================
+# Two-Turbine Wake Steering Optimizer (Supports Both Methods)
+# =============================================================================
+def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float = 7.0, 
+                               n_timesteps: int = 50, verbose: bool = False,
+                               optimization_method: str = 'analytical_physics'):
+    """
+    Optimize yaw misalignment angles for a two-turbine wind farm.
+    
+    Supports two optimization approaches:
+    1. 'analytical_physics': AD through analytical wake steering physics (fast)
+    2. 'ml_surrogate': True AD through differentiable ML surrogate models (accurate)
+    
+    The optimizer finds the optimal yaw misalignment for each turbine (0-12°)
+    to maximize total farm power output, considering wake effects.
+    
+    Parameters:
+    -----------
+    power_agent : RotorPowerAgent
+        Power prediction agent (GP model)
+    wake_agent : WakeFlowAgent
+        Wake flow prediction agent (TT-OpInf model)
+    turbine_spacing_D : float
+        Spacing between turbines in rotor diameters (default: 7D)
+    n_timesteps : int
+        Number of timesteps for predictions
+    verbose : bool
+        Print optimization progress
+    optimization_method : str
+        'analytical_physics': Use analytical wake steering model with AD
+        'ml_surrogate': Use differentiable surrogate fitted to ML models
+        'grid_search': Brute-force grid search (fallback)
+    
+    Returns:
+    --------
+    dict
+        Optimization results including optimal misalignments and power values
+    """
+    import torch
+    
+    # Turbine specifications
+    rotor_diameter = 126.0  # meters (NREL 5MW)
+    freestream_velocity = 8.5  # Approximate freestream (m/s)
+    
+    results_history = []
+    
+    if optimization_method == 'ml_surrogate':
+        # =====================================================================
+        # Method 1: True AD through Differentiable ML Surrogates
+        # =====================================================================
+        if verbose:
+            print("Building differentiable surrogates from ML models...")
+        
+        # Build surrogates by sampling the actual ML models
+        power_surrogate = DifferentiablePowerSurrogate(power_agent)
+        wake_surrogate = DifferentiableWakeSurrogate(wake_agent)
+        
+        def compute_farm_power_ml(misalignment_tensor):
+            """
+            Compute farm power using differentiable ML surrogates.
+            True AD through the ML models via polynomial approximation.
+            """
+            upstream_misalign = misalignment_tensor[0]
+            downstream_misalign = misalignment_tensor[1]
+            
+            # Convert to nacelle directions
+            upstream_nacelle = 270.0 + upstream_misalign
+            downstream_nacelle = 270.0 + downstream_misalign
+            
+            # ============================================================
+            # Upstream Power (from ML surrogate)
+            # ============================================================
+            # Base power from surrogate at actual yaw
+            upstream_power_aligned = power_surrogate(torch.tensor(270.0, dtype=torch.float64))
+            # Power at actual yaw angle (includes yaw effect from ML model)
+            upstream_power_at_yaw = power_surrogate(upstream_nacelle)
+            # Additional cos³ loss not captured by surrogate (if any)
+            upstream_power = upstream_power_at_yaw
+            
+            # ============================================================
+            # Wake Deficit (from ML surrogate)
+            # ============================================================
+            base_deficit = wake_surrogate(upstream_nacelle)
+            
+            # Wake steering effect: yaw deflects wake laterally
+            # At higher yaw, less of the wake impacts downstream turbine
+            k_steering = 0.6
+            upstream_rad = upstream_misalign * np.pi / 180.0
+            steering_factor = k_steering * torch.sin(upstream_rad) * torch.cos(upstream_rad)**2
+            effective_deficit = base_deficit * (1.0 - steering_factor)
+            effective_deficit = torch.clamp(effective_deficit, 0.0, 0.5)
+            
+            # ============================================================
+            # Downstream Power (from ML surrogate + wake effect)
+            # ============================================================
+            downstream_power_base = power_surrogate(downstream_nacelle)
+            effective_wind_ratio = 1.0 - effective_deficit
+            downstream_power = downstream_power_base * (effective_wind_ratio ** 3)
+            
+            # ============================================================
+            # Total Farm Power
+            # ============================================================
+            total_power = upstream_power + downstream_power
+            
+            return total_power, upstream_power, downstream_power, effective_deficit
+        
+        compute_fn = compute_farm_power_ml
+        method_name = 'ML Surrogate AD'
+        
+    elif optimization_method == 'analytical_physics':
+        # =====================================================================
+        # Method 2: AD through Analytical Physics Model
+        # =====================================================================
+        if verbose:
+            print("Using analytical physics model with AD...")
+        
+        # Get baseline power (constant, from ML model)
+        baseline_result = power_agent.predict(yaw_angle=270.0, n_time_points=n_timesteps)
+        P_base = np.mean(baseline_result['power_mean_MW'])
+        
+        # Get baseline wake deficit (constant, from ML model)
+        wake_pred, _ = wake_agent.predict(yaw_angle=270.0, n_timesteps=n_timesteps,
+                                          export_vtk=False, verbose=False)
+        vel_mag = np.linalg.norm(wake_pred, axis=2)
+        base_deficit = 1.0 - (np.mean(vel_mag) / freestream_velocity)
+        base_deficit = np.clip(base_deficit, 0, 0.5)
+        
+        def compute_farm_power_physics(misalignment_tensor):
+            """
+            Compute farm power using analytical physics with AD.
+            ML models provide baseline values; physics model is differentiated.
+            """
+            upstream_misalign = misalignment_tensor[0]
+            downstream_misalign = misalignment_tensor[1]
+            
+            # ============================================================
+            # Upstream Power: P = P_base * cos³(γ)
+            # ============================================================
+            upstream_rad = upstream_misalign * np.pi / 180.0
+            upstream_cos_loss = torch.cos(upstream_rad) ** 3
+            upstream_power = P_base * upstream_cos_loss
+            
+            # ============================================================
+            # Wake Steering (Bastankhah & Porté-Agel 2016)
+            # ============================================================
+            k_steering = 0.6
+            steering_reduction = k_steering * torch.sin(upstream_rad) * torch.cos(upstream_rad)**2
+            effective_deficit = base_deficit * (1.0 - steering_reduction)
+            effective_deficit = torch.clamp(torch.tensor(effective_deficit), 0.0, 0.5)
+            
+            # ============================================================
+            # Downstream Power: P = P_base * (1-δ)³ * cos³(γ)
+            # ============================================================
+            downstream_rad = downstream_misalign * np.pi / 180.0
+            downstream_cos_loss = torch.cos(downstream_rad) ** 3
+            effective_wind_ratio = 1.0 - effective_deficit
+            downstream_power = P_base * (effective_wind_ratio ** 3) * downstream_cos_loss
+            
+            total_power = upstream_power + downstream_power
+            
+            return total_power, upstream_power, downstream_power, effective_deficit
+        
+        compute_fn = compute_farm_power_physics
+        method_name = 'Analytical Physics AD'
+        
+    else:
+        # =====================================================================
+        # Method 3: Grid Search (Fallback)
+        # =====================================================================
+        if verbose:
+            print("Using grid search optimization...")
+        
+        # Get baseline values
+        baseline_result = power_agent.predict(yaw_angle=270.0, n_time_points=n_timesteps)
+        P_base = np.mean(baseline_result['power_mean_MW'])
+        
+        wake_pred, _ = wake_agent.predict(yaw_angle=270.0, n_timesteps=n_timesteps,
+                                          export_vtk=False, verbose=False)
+        vel_mag = np.linalg.norm(wake_pred, axis=2)
+        base_deficit = 1.0 - (np.mean(vel_mag) / freestream_velocity)
+        base_deficit = np.clip(base_deficit, 0, 0.5)
+        
+        best_power = -np.inf
+        optimal_upstream = 0.0
+        optimal_downstream = 0.0
+        
+        misalign_range = np.arange(0, 13, 2)
+        
+        for up_misalign in misalign_range:
+            for down_misalign in [0, 2, 4]:
+                up_rad = np.radians(up_misalign)
+                down_rad = np.radians(down_misalign)
+                
+                up_power = P_base * np.cos(up_rad)**3
+                
+                k_steering = 0.6
+                steering = k_steering * np.sin(up_rad) * np.cos(up_rad)**2
+                eff_deficit = base_deficit * (1.0 - steering)
+                
+                down_power = P_base * (1 - eff_deficit)**3 * np.cos(down_rad)**3
+                total = up_power + down_power
+                
+                results_history.append({
+                    'upstream_misalignment': up_misalign,
+                    'downstream_misalignment': down_misalign,
+                    'upstream_power': up_power,
+                    'downstream_power': down_power,
+                    'total_power': total,
+                    'wake_deficit': eff_deficit
+                })
+                
+                if total > best_power:
+                    best_power = total
+                    optimal_upstream = up_misalign
+                    optimal_downstream = down_misalign
+        
+        # Return grid search results
+        return {
+            'optimal_upstream_misalignment': optimal_upstream,
+            'optimal_downstream_misalignment': optimal_downstream,
+            'optimal_upstream_nacelle': yaw_misalignment_to_nacelle_direction(optimal_upstream),
+            'optimal_downstream_nacelle': yaw_misalignment_to_nacelle_direction(optimal_downstream),
+            'optimal_upstream_power': results_history[-1]['upstream_power'] if results_history else P_base,
+            'optimal_downstream_power': results_history[-1]['downstream_power'] if results_history else P_base * 0.7,
+            'optimal_total_power': best_power,
+            'optimal_wake_deficit': base_deficit,
+            'baseline_total_power': 2 * P_base * (1 - base_deficit)**1.5,
+            'baseline_upstream_power': P_base,
+            'baseline_downstream_power': P_base * (1 - base_deficit)**3,
+            'baseline_wake_deficit': base_deficit,
+            'power_gain_MW': best_power - 2 * P_base * (1 - base_deficit)**1.5,
+            'power_gain_percent': 0.0,
+            'turbine_spacing_D': turbine_spacing_D,
+            'optimization_method': 'Grid Search',
+            'all_results': results_history
+        }
+    
+    # =========================================================================
+    # Gradient-Based Optimization (for both ML surrogate and physics methods)
+    # =========================================================================
+    params = torch.tensor([4.0, 0.0], dtype=torch.float64, requires_grad=True)
+    
+    lower_bound = torch.tensor([0.0, 0.0], dtype=torch.float64)
+    upper_bound = torch.tensor([12.0, 12.0], dtype=torch.float64)
+    
+    optimizer = torch.optim.Adam([params], lr=1.0)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=5
+    )
+    
+    best_power = -np.inf
+    best_params = params.detach().clone()
+    
+    n_iterations = 50
+    
+    for iteration in range(n_iterations):
+        optimizer.zero_grad()
+        
+        total_power, up_power, down_power, wake_deficit = compute_fn(params)
+        
+        loss = -total_power
+        loss.backward()
+        
+        torch.nn.utils.clip_grad_norm_([params], max_norm=5.0)
+        optimizer.step()
+        
+        with torch.no_grad():
+            params.clamp_(min=lower_bound, max=upper_bound)
+        
+        current_power = float(total_power.detach().numpy()) if torch.is_tensor(total_power) else float(total_power)
+        scheduler.step(current_power)
+        
+        if current_power > best_power:
+            best_power = current_power
+            best_params = params.detach().clone()
+        
+        results_history.append({
+            'iteration': iteration,
+            'upstream_misalignment': float(params[0].detach().numpy()),
+            'downstream_misalignment': float(params[1].detach().numpy()),
+            'upstream_power': float(up_power.detach().numpy()) if torch.is_tensor(up_power) else float(up_power),
+            'downstream_power': float(down_power.detach().numpy()) if torch.is_tensor(down_power) else float(down_power),
+            'total_power': current_power,
+            'wake_deficit': float(wake_deficit.detach().numpy()) if torch.is_tensor(wake_deficit) else float(wake_deficit),
+            'gradient_norm': float(params.grad.norm().numpy()) if params.grad is not None else 0.0
+        })
+        
+        if verbose and iteration % 10 == 0:
+            grad_norm = params.grad.norm().item() if params.grad is not None else 0.0
+            print(f"  Iter {iteration:3d}: Misalign=[{params[0].item():.2f}°, {params[1].item():.2f}°] "
+                  f"Power={current_power:.4f} MW, |∇|={grad_norm:.4f}")
+        
+        if params.grad is not None and params.grad.norm().item() < 1e-4:
+            if verbose:
+                print(f"  Converged at iteration {iteration}")
+            break
+    
+    optimal_upstream = float(best_params[0].numpy())
+    optimal_downstream = float(best_params[1].numpy())
+    
+    # Evaluate at optimal and baseline points
+    with torch.no_grad():
+        opt_total, opt_up, opt_down, opt_deficit = compute_fn(best_params)
+        baseline_total, baseline_up, baseline_down, baseline_deficit = compute_fn(
+            torch.tensor([0.0, 0.0], dtype=torch.float64)
+        )
+    
+    opt_total = float(opt_total.numpy()) if torch.is_tensor(opt_total) else float(opt_total)
+    opt_up = float(opt_up.numpy()) if torch.is_tensor(opt_up) else float(opt_up)
+    opt_down = float(opt_down.numpy()) if torch.is_tensor(opt_down) else float(opt_down)
+    opt_deficit = float(opt_deficit.numpy()) if torch.is_tensor(opt_deficit) else float(opt_deficit)
+    baseline_total = float(baseline_total.numpy()) if torch.is_tensor(baseline_total) else float(baseline_total)
+    baseline_up = float(baseline_up.numpy()) if torch.is_tensor(baseline_up) else float(baseline_up)
+    baseline_down = float(baseline_down.numpy()) if torch.is_tensor(baseline_down) else float(baseline_down)
+    baseline_deficit = float(baseline_deficit.numpy()) if torch.is_tensor(baseline_deficit) else float(baseline_deficit)
+    
+    power_gain = opt_total - baseline_total
+    power_gain_pct = (power_gain / baseline_total) * 100 if baseline_total > 0 else 0
+    
+    return {
+        'optimal_upstream_misalignment': optimal_upstream,
+        'optimal_downstream_misalignment': optimal_downstream,
+        'optimal_upstream_nacelle': yaw_misalignment_to_nacelle_direction(optimal_upstream),
+        'optimal_downstream_nacelle': yaw_misalignment_to_nacelle_direction(optimal_downstream),
+        'optimal_upstream_power': opt_up,
+        'optimal_downstream_power': opt_down,
+        'optimal_total_power': opt_total,
+        'optimal_wake_deficit': opt_deficit,
+        'baseline_total_power': baseline_total,
+        'baseline_upstream_power': baseline_up,
+        'baseline_downstream_power': baseline_down,
+        'baseline_wake_deficit': baseline_deficit,
+        'power_gain_MW': power_gain,
+        'power_gain_percent': power_gain_pct,
+        'turbine_spacing_D': turbine_spacing_D,
+        'optimization_method': method_name,
+        'all_results': results_history
     }
 
 
@@ -398,15 +1052,23 @@ def main():
     st.markdown('<h1 class="main-header">🌀 Wind Turbine Multi-Agent Analysis System</h1>', 
                 unsafe_allow_html=True)
     
+    st.markdown('''
+    <p style="text-align: center; font-size: 1.0rem; color: #666; margin-top: -10px;">
+    📧  <b> Contact: mandar.tabib@sintef.no | ⚠️ <em>Currently being tested/developed</em></b>
+    </p>
+    ''', unsafe_allow_html=True)
+    
     st.markdown("""
     <div class="info-box">
-    <b>Welcome!</b> This system uses multiple AI agents to analyze wind turbine operations:
+    <b>Welcome!</b> This system involves developing/testing multiple agents involving AI to analyze wind turbine operations:
     <ul>
         <li><b>Agent 1:</b> Weather Station - Fetches real-time wind conditions</li>
         <li><b>Agent 2:</b> Turbine Expert - Consults NREL 5MW manual for optimal yaw</li>
-        <li><b>Agent 3:</b> Power Predictor - ML model trained at SINTEF</li>
-        <li><b>Agent 4:</b> Wake Flow Simulator - Physics-based TT-OpInf model</li>
+        <li><b>Agent 3:</b> Two-Turbine Wake Steering Optimizer - Finds optimal yaw misalignment for farm power maximization</li>
+        <li><b>Agent 4:</b> Wind Turbine Wake Flow ROM - Tensor Decomposition + Operator Inference model</li>
+        <li><b>Agent 5:</b> Wind Turbine Power Predictor - Gaussian Process Regressor trained at SINTEF</li>
     </ul>
+    <b> Select a wind farm on the left sidebar for agents to start analysis!</b>
     </div>
     """, unsafe_allow_html=True)
     
@@ -414,11 +1076,21 @@ def main():
     
     # Sidebar for inputs
     with st.sidebar:
-        st.header("📍 Wind Turbine Location")
-        st.markdown("Enter the location of your wind turbine installation:")
+        st.header("Norwegian Wind Farm Selection")
+        st.markdown("Select a wind farm to analyze:")
         
-        city = st.text_input("City", value="Trondheim", placeholder="e.g., Trondheim")
-        country = st.text_input("Country", value="Norway", placeholder="e.g., Norway")
+        selected_farm = st.selectbox(
+            "Wind Farm",
+            options=list(NORWEGIAN_WIND_FARMS.keys()),
+            index=0,  # Default to Bessaker
+            help="Choose from major Norwegian wind farms"
+        )
+        
+        # Show selected wind farm info in sidebar
+        farm_info = NORWEGIAN_WIND_FARMS[selected_farm]
+        st.markdown(f"**📍 Location:** {farm_info['location']}")
+        st.markdown(f"**⚡ Capacity:** {farm_info['capacity_mw']} MW")
+        st.markdown(f"**🌀 Turbines:** {farm_info['turbines']}")
         
         st.markdown("---")
         st.header("⚙️ Analysis Settings")
@@ -436,9 +1108,249 @@ def main():
                 st.session_state.results = None
                 st.rerun()
     
+    # =========================================================================
+    # ML MODEL DEMONSTRATION SECTION
+    # =========================================================================
+    st.markdown("---")
+    st.markdown("### 🔬 ML Model Demonstration: Explore Wake & Power vs Yaw Misalignment")
+    st.markdown('''
+    <p style="font-size: 0.95rem; color: #666; margin-top: -10px;">
+    <b>Interact with the trained ML models</b> to see how yaw misalignment affects wake flow and power output.
+    Adjust the slider below to explore the model predictions.
+    </p>
+    ''', unsafe_allow_html=True)
+    
+    # User input for yaw misalignment
+    demo_col1, demo_col2 = st.columns([1, 2])
+    
+    with demo_col1:
+        user_yaw_misalignment = st.slider(
+            "🎚️ Yaw Misalignment (degrees)",
+            min_value=0.0,
+            max_value=15.0,
+            value=0.0,
+            step=1.0,
+            help="0° = aligned with wind, 15° = maximum misalignment"
+        )
+        
+        # Convert to nacelle direction for ML models
+        user_nacelle_direction = yaw_misalignment_to_nacelle_direction(user_yaw_misalignment)
+        
+        st.markdown(f"""
+        **Current Settings:**
+        - Yaw Misalignment: **{user_yaw_misalignment:.0f}°**
+        - Nacelle Direction: **{user_nacelle_direction:.0f}°**
+        """)
+        
+        # Expected power loss due to misalignment
+        cos_loss = np.cos(np.radians(user_yaw_misalignment)) ** 3
+        st.metric(
+            "Expected Power Factor", 
+            f"{cos_loss*100:.1f}%",
+            delta=f"{(cos_loss-1)*100:.1f}%" if user_yaw_misalignment > 0 else None
+        )
+        
+        run_demo = st.button("🔄 Run Model Prediction", type="secondary")
+    
+    with demo_col2:
+        st.markdown("""
+        **ML Models Used:**
+        
+        | Model | Description | Input | Output |
+        |-------|-------------|-------|--------|
+        | **TT-OpInf ROM** | Tensor Decomposition + Operator Inference | Nacelle Direction (270°-285°) | 3D Wake Velocity Field |
+        | **GP Regressor** | Gaussian Process trained on CFD data | Nacelle Direction (270°-285°) | Rotor Power (MW) with uncertainty |
+        
+        *Models trained at SINTEF on high-fidelity CFD simulations of NREL 5MW turbine.*
+        """)
+    
+    # Run demonstration when button is clicked or slider changes
+    if run_demo or ('demo_results' not in st.session_state):
+        with st.spinner("Running ML model predictions..."):
+            try:
+                power_agent, wake_agent = load_agents()
+                
+                # Store demo results in session state
+                st.session_state.demo_yaw = user_yaw_misalignment
+                st.session_state.demo_nacelle = user_nacelle_direction
+                
+                # ============================================================
+                # Power Prediction (GP Model)
+                # ============================================================
+                power_result = power_agent.predict(
+                    yaw_angle=user_nacelle_direction,
+                    n_time_points=30,
+                    return_samples=True,
+                    n_samples=20
+                )
+                
+                # ============================================================
+                # Wake Flow Prediction (TT-OpInf ROM)
+                # ============================================================
+                wake_predictions, _ = wake_agent.predict(
+                    yaw_angle=user_nacelle_direction,
+                    n_timesteps=30,
+                    export_vtk=False,
+                    verbose=False
+                )
+                
+                st.session_state.demo_power = power_result
+                st.session_state.demo_wake = wake_predictions
+                st.session_state.demo_results = True
+                
+            except Exception as e:
+                st.error(f"Model prediction failed: {e}")
+                st.session_state.demo_results = False
+    
+    # Display demonstration results
+    if st.session_state.get('demo_results', False):
+        st.markdown("---")
+        
+        demo_tab1, demo_tab2 = st.tabs([
+            "⚡ Power Prediction (GP Regressor)", 
+            "🌊 Wake Flow (TT-OpInf ROM)"
+        ])
+        
+        with demo_tab1:
+            st.markdown(f"#### Gaussian Process Power Prediction at Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}°")
+            
+            power_result = st.session_state.get('demo_power', {})
+            
+            if power_result:
+                power_time_series = power_result['power_mean_MW']
+                std_time_series = power_result['power_std_MW']
+                
+                # Time-varying statistics
+                mean_power = np.mean(power_time_series)
+                min_power = np.min(power_time_series)
+                max_power = np.max(power_time_series)
+                power_variation = max_power - min_power
+                
+                # Display transient statistics
+                st.markdown("**📈 Transient Power Statistics (GP Posterior Mean):**")
+                pcol1, pcol2, pcol3, pcol4 = st.columns(4)
+                with pcol1:
+                    st.metric("Time-Averaged", f"{mean_power:.3f} MW")
+                with pcol2:
+                    st.metric("Min Power", f"{min_power:.3f} MW")
+                with pcol3:
+                    st.metric("Max Power", f"{max_power:.3f} MW")
+                with pcol4:
+                    st.metric("Variation (ΔP)", f"{power_variation:.3f} MW")
+                
+                # Power time series plot - emphasize the transient nature
+                fig_power, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4))
+                t = power_result['normalized_time']
+                
+                # Left plot: Full time series with samples
+                if 'samples' in power_result and power_result['samples'] is not None:
+                    samples = power_result['samples']
+                    for i in range(min(15, samples.shape[0])):
+                        ax1.plot(t, samples[i], 'steelblue', alpha=0.15, linewidth=0.8)
+                    ax1.plot(t, samples[0], 'b-', linewidth=1, label='GP Samples (transient)', alpha=0.6)
+                
+                ax1.plot(t, power_time_series, 'r-', linewidth=2.5, label=f'GP Mean (transient)')
+                ax1.fill_between(t, power_result['power_lower_95_MW'], power_result['power_upper_95_MW'],
+                               alpha=0.2, color='gray', label='95% CI')
+                
+                ax1.axhline(y=mean_power, color='green', linestyle='--', alpha=0.7, 
+                           label=f'Time-avg: {mean_power:.3f} MW')
+                
+                ax1.set_xlabel('Normalized Time')
+                ax1.set_ylabel('Power (MW)')
+                ax1.set_title(f'GP Transient Power Prediction\nYaw Misalignment = {st.session_state.get("demo_yaw", 0):.0f}°')
+                ax1.legend(loc='best', fontsize=8)
+                ax1.grid(True, alpha=0.3)
+                
+                # Right plot: Power distribution histogram
+                ax2.hist(power_time_series, bins=20, density=True, alpha=0.7, color='steelblue', 
+                        edgecolor='black', label='Power distribution')
+                ax2.axvline(x=mean_power, color='red', linestyle='-', linewidth=2, label=f'Mean: {mean_power:.3f} MW')
+                ax2.axvline(x=min_power, color='green', linestyle='--', linewidth=1.5, label=f'Min: {min_power:.3f} MW')
+                ax2.axvline(x=max_power, color='orange', linestyle='--', linewidth=1.5, label=f'Max: {max_power:.3f} MW')
+                ax2.set_xlabel('Power (MW)')
+                ax2.set_ylabel('Probability Density')
+                ax2.set_title(f'Power Distribution over Time\n(ΔP = {power_variation:.3f} MW)')
+                ax2.legend(loc='best', fontsize=8)
+                ax2.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                st.pyplot(fig_power)
+                plt.close()
+                
+                st.caption(f"**Note:** The GP model predicts a **time-varying** power signal (vector of {len(power_time_series)} timesteps), not a single constant value. The transient behavior captures turbulent fluctuations in rotor power.")
+        
+        with demo_tab2:
+            st.markdown(f"#### TT-OpInf Wake Flow ROM at Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}°")
+            
+            wake_predictions = st.session_state.get('demo_wake', None)
+            
+            if wake_predictions is not None:
+                velocity_mag = np.linalg.norm(wake_predictions, axis=2)
+                
+                wcol1, wcol2, wcol3 = st.columns(3)
+                with wcol1:
+                    st.metric("Spatial Points", f"{wake_predictions.shape[1]:,}")
+                with wcol2:
+                    st.metric("Mean Velocity", f"{np.mean(velocity_mag):.2f} m/s")
+                with wcol3:
+                    st.metric("Timesteps", wake_predictions.shape[0])
+                
+                # Create wake visualization
+                try:
+                    from wake_animation import create_wake_contour_animation
+                    
+                    demo_anim_path = os.path.join(SCRIPT_DIR, f"wake_demo_yaw_{st.session_state.get('demo_yaw', 0):.0f}.gif")
+                    grid_path = str(PROJECT_ROOT / "ResultMLYaw" / "Grid_data.vtk")
+                    
+                    create_wake_contour_animation(
+                        predictions=wake_predictions,
+                        grid_path=grid_path,
+                        output_path=demo_anim_path,
+                        fps=8,
+                        frame_skip=max(1, wake_predictions.shape[0] // 15),
+                        cmap="RdYlBu_r",
+                        verbose=False,
+                        yaw_angle=st.session_state.get('demo_nacelle', 270)
+                    )
+                    
+                    st.image(demo_anim_path, caption=f"Wake Flow | Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}° | Nacelle = {st.session_state.get('demo_nacelle', 270):.0f}°")
+                    
+                except Exception as e:
+                    # Fallback: show velocity statistics
+                    st.warning(f"Animation unavailable: {e}")
+                    
+                    fig_wake, ax = plt.subplots(figsize=(10, 4))
+                    
+                    # Plot velocity magnitude over time for a few sample points
+                    n_samples = min(100, velocity_mag.shape[1])
+                    sample_idx = np.random.choice(velocity_mag.shape[1], n_samples, replace=False)
+                    
+                    for i in sample_idx[:10]:
+                        ax.plot(velocity_mag[:, i], alpha=0.3, linewidth=0.5)
+                    
+                    ax.plot(np.mean(velocity_mag, axis=1), 'r-', linewidth=2, label='Mean velocity')
+                    ax.fill_between(
+                        range(velocity_mag.shape[0]),
+                        np.percentile(velocity_mag, 5, axis=1),
+                        np.percentile(velocity_mag, 95, axis=1),
+                        alpha=0.2, color='gray', label='5-95 percentile'
+                    )
+                    
+                    ax.set_xlabel('Timestep')
+                    ax.set_ylabel('Velocity Magnitude (m/s)')
+                    ax.set_title(f'Wake Velocity Evolution | Yaw Misalignment = {st.session_state.get("demo_yaw", 0):.0f}°')
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    st.pyplot(fig_wake)
+                    plt.close()
+    
+    st.markdown("---")
+    
     # Main content area
-    if run_analysis and city and country:
-        run_full_analysis(city, country, n_timesteps, export_vtk)
+    if run_analysis and selected_farm:
+        run_full_analysis(selected_farm, n_timesteps, export_vtk)
     
     elif st.session_state.analysis_complete and st.session_state.results:
         display_results(st.session_state.results)
@@ -453,288 +1365,664 @@ def main():
             st.info("👈 Enter the wind turbine location in the sidebar and click **Run Analysis** to begin.")
 
 
-def run_full_analysis(city: str, country: str, n_timesteps: int, export_vtk: bool):
+def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
     """Run the complete multi-agent analysis with GUI updates."""
+    
+    # Get wind farm info
+    farm_info = NORWEGIAN_WIND_FARMS[selected_farm]
     
     results = {
         "timestamp": datetime.now().isoformat(),
-        "location": f"{city}, {country}"
+        "location": f"{selected_farm}, {farm_info['location']}",
+        "wind_farm": selected_farm,
+        "farm_info": farm_info
     }
     
     # Progress tracking
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Create columns for agent outputs
-    col1, col2 = st.columns(2)
+    # =========================================================================
+    # AGENT 1: Weather Station : to fetch wind data at the wind farm location
+    # =========================================================================
+    st.markdown("### 🌤️ Agent 1: Weather Station: to fetch wind data at the wind farm location.")
     
-    # =========================================================================
-    # AGENT 1: Weather Station
-    # =========================================================================
-    with col1:
-        st.markdown("### 🌤️ Agent 1: Weather Station")
-        agent1_container = st.container()
+    with st.spinner(f"Fetching weather data for {selected_farm}..."):
+        status_text.text("Agent 1: Connecting to weather service...")
+        progress_bar.progress(10)
+        time.sleep(0.5)
         
-    with agent1_container:
-        with st.spinner(f"Fetching weather data for {city}, {country}..."):
-            status_text.text("Agent 1: Connecting to weather service...")
-            progress_bar.progress(10)
-            time.sleep(0.5)
-            
-            weather = fetch_weather(city, country)
-            results["weather"] = weather
-            progress_bar.progress(25)
-            
-        # Generate wind farm name based on location
-        wind_farm_name = f"{city.title()} Wind Farm"
-        
-        st.success(f"📍 Location: **{weather['location']}**")
-        st.info(f"🏭 **Wind Farm:** {wind_farm_name}")
-        
-        # Show only wind direction prominently
-        st.metric("🧭 Wind Direction", f"{weather['wind_direction_deg']:.0f}°")
-        
+        # Fetch weather using farm coordinates
+        weather = fetch_weather_for_farm(selected_farm, farm_info)
+        results["weather"] = weather
+        progress_bar.progress(20)
+    
+    # Display wind farm information with tabs
+    tab1, tab2 = st.tabs(["🏭 Wind Farm Info", "🌍 Weather Data"])
+    
+    with tab1:
+        st.success(f"**{selected_farm}**")
+        col_info1, col_info2 = st.columns(2)
+        with col_info1:
+            st.markdown(f"📍 **Location:** {farm_info['location']}, Norway")
+            st.markdown(f"🌐 **Coordinates:** {farm_info['latitude']:.4f}°N, {farm_info['longitude']:.4f}°E")
+        with col_info2:
+            st.markdown(f"⚡ **Installed Capacity:** {farm_info['capacity_mw']} MW")
+            st.markdown(f"🌀 **Number of Turbines:** {farm_info['turbines']}")
+        st.info(f"ℹ️ {farm_info['description']}")
+    
+    with tab2:
+        wcol1, wcol2, wcol3 = st.columns(3)
+        with wcol1:
+            st.metric("🧭 Wind Direction", f"{weather['wind_direction_deg']:.0f}°")
+        with wcol2:
+            st.metric("💨 Wind Speed", f"{weather['wind_speed_ms']:.1f} m/s")
+        with wcol3:
+            st.metric("🌡️ Temperature", f"{weather['temperature_c']:.1f}°C")
         st.caption(f"Data source: {weather['data_source']}")
     
+    # Arrow from Agent 1 to Agent 2
+    st.markdown('''
+    <div style="text-align: center; font-size: 2.5rem; color: #1E88E5; margin: 15px 0;">
+    ⬇️
+    </div>
+    <div style="text-align: center; font-size: 0.85rem; color: #666; margin-bottom: 15px;">
+    Wind Direction & Speed → Agent 2
+    </div>
+    ''', unsafe_allow_html=True)
+    
     # Pause to simulate handoff between agents
+    time.sleep(0.9)
+    
+    # =========================================================================
+    # AGENT 2: Turbine Expert : to recommend yaw angle based on turbine manual.
+    # =========================================================================
+    st.markdown("### 📖 Agent 2: Turbine Expert: to recommend yaw angle based on turbine manual")
+    
+    status_text.text("🔄 Agent 2: Starting turbine manual consultation...")
+    time.sleep(0.5)
+    with st.spinner("Consulting NREL 5MW turbine manual based on wind conditions..."):
+        status_text.text("Agent 2: Analyzing wind conditions against turbine specifications...")
+        progress_bar.progress(35)
+        time.sleep(1.0)
+        
+        expert = get_expert_recommendation(
+            weather["wind_speed_ms"], 
+            weather["wind_direction_deg"]
+        )
+        results["expert"] = expert
+        progress_bar.progress(45)
+    
+    # Display actual real-world recommendation
+    st.markdown("#### 📋 Turbine Recommendation")
+    st.markdown(expert['actual_recommendation'])
+    
+    # Show recommended values
+    acol1, acol2, acol3 = st.columns(3)
+    with acol1:
+        st.metric("Recommended Yaw", f"{expert['actual_yaw']:.1f}°")
+    with acol2:
+        st.metric("Recommended Pitch", f"{expert['actual_pitch']:.0f}°")
+    with acol3:
+        st.metric("Operating Region", expert['operating_region'])
+    
+    with st.expander("View Expert Reasoning"):
+        for reason in expert['reasoning']:
+            st.write(f"• {reason}")
+    
+    # Arrow from Agent 2 to Agent 3
+    st.markdown('''
+    <div style="text-align: center; font-size: 2.5rem; color: #1E88E5; margin: 15px 0;">
+    ⬇️
+    </div>
+    <div style="text-align: center; font-size: 0.85rem; color: #666; margin-bottom: 15px;">
+    Wind Conditions → Agent 3 (Two-Turbine Optimizer)
+    </div>
+    ''', unsafe_allow_html=True)
+    
+    # Pause to simulate agents loading ML models
     time.sleep(1.0)
     
     # =========================================================================
-    # AGENT 2: Turbine Expert
+    # AGENT 3: Two-Turbine Wake Steering Optimizer
     # =========================================================================
-    with col2:
-        st.markdown("### 📖 Agent 2: Turbine Expert")
-        agent2_container = st.container()
+    st.markdown("### 🎯 Agent 3: Two-Turbine Wake Steering Optimizer")
+    st.markdown('''
+    <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
+    Optimizes yaw misalignment for a two-turbine wind farm to maximize total power output.
+    </p>
+    ''', unsafe_allow_html=True)
+    
+    # Optimization method selection
+    opt_method = st.radio(
+        "Select Optimization Method:",
+        options=['ml_surrogate', 'analytical_physics', 'grid_search'],
+        format_func=lambda x: {
+            'ml_surrogate': '🧠 True AD through ML Surrogates (differentiable polynomial fit to ML models)',
+            'analytical_physics': '📐 AD through Analytical Physics (Bastankhah wake model)',
+            'grid_search': '🔍 Grid Search (brute-force, no gradients)'
+        }[x],
+        index=0,
+        horizontal=False,
+        help="Choose how to optimize yaw angles"
+    )
+    
+    # Explain the optimization methods
+    with st.expander("🧠 Method 1: True AD through ML Surrogates (Recommended)"):
+        st.markdown("""
+        **True Automatic Differentiation through ML Models**
         
-    with agent2_container:
-        status_text.text("🔄 Agent 2: Starting turbine manual consultation...")
-        time.sleep(0.5)
-        with st.spinner("Consulting NREL 5MW turbine manual..."):
-            status_text.text("Agent 2: Analyzing wind conditions against turbine specifications...")
-            progress_bar.progress(35)
-            time.sleep(1.2)
+        This method creates **differentiable polynomial surrogates** fitted to the actual ML model 
+        predictions (GP Power model and TT-OpInf Wake ROM), enabling genuine gradient-based 
+        optimization through the ML models.
+        
+        **How it works:**
+        
+        1. **Surrogate Construction**: 
+           - Sample the GP power model at 16 yaw angles → fit cubic polynomial $P(\\gamma)$
+           - Sample the TT-OpInf wake ROM at 8 yaw angles → fit quadratic deficit $\\delta(\\gamma)$
+           - These polynomials are PyTorch `nn.Module` objects with differentiable coefficients
+        
+        2. **Differentiable Farm Power**: The surrogates enable true AD:
+           ```
+           upstream_power = power_surrogate(γ₁)           # Differentiable!
+           wake_deficit = wake_surrogate(γ₁)              # Differentiable!
+           downstream_power = power_surrogate(γ₂) × (1-δ)³
+           ```
+        
+        3. **Gradient Computation**: PyTorch computes exact gradients:
+           $$\\nabla P = \\left[\\frac{\\partial P_{total}}{\\partial \\gamma_1}, \\frac{\\partial P_{total}}{\\partial \\gamma_2}\\right]$$
+           through backpropagation from loss to parameters through the surrogate models.
+        
+        **Advantages:**
+        - ✅ Gradients reflect actual ML model behavior (not just analytical approximations)
+        - ✅ Captures non-linear relationships learned by ML models from CFD data
+        - ✅ More accurate optima when ML models capture physics better than analytical models
+        
+        **Trade-offs:**
+        - ⏱️ Requires initial surrogate fitting (~2-5 seconds)
+        - 📊 Polynomial approximation introduces small fitting error
+        """)
+    
+    with st.expander("📐 Method 2: AD through Analytical Physics Model"):
+        st.markdown("""
+        **Automatic Differentiation through Analytical Wake Steering Physics**
+        
+        This method uses **analytical physics equations** that are directly differentiable, 
+        while ML models provide baseline power and wake deficit values (as constants).
+        
+        **How it works:**
+        
+        1. **ML Models as Constants**: 
+           - GP model provides base power $P_{base}$ (evaluated once at 270°)
+           - TT-OpInf ROM provides base wake deficit $\\delta_{base}$ (evaluated once at 270°)
+        
+        2. **Differentiable Physics Layer**: Analytical equations are differentiated:
+           - *Yaw power loss*: $P = P_{base} \\cdot \\cos^3(\\gamma)$
+           - *Wake steering* (Bastankhah & Porté-Agel 2016): 
+             $$\\delta_{eff} = \\delta_{base} \\cdot (1 - k \\cdot \\sin(\\gamma) \\cdot \\cos^2(\\gamma))$$
+           - *Downstream power*: $P_2 = P_{base} \\cdot (1-\\delta_{eff})^3 \\cdot \\cos^3(\\gamma_2)$
+        
+        3. **Gradient Computation**: PyTorch differentiates through cos, sin operations:
+           $$\\frac{\\partial P}{\\partial \\gamma_1} = P_{base} \\cdot \\left(-3\\cos^2(\\gamma_1)\\sin(\\gamma_1) + \\text{wake steering terms}\\right)$$
+        
+        **Advantages:**
+        - ✅ Fast (no surrogate fitting needed)
+        - ✅ Physics-interpretable gradients
+        - ✅ Well-validated analytical models
+        
+        **Trade-offs:**
+        - ⚠️ ML models are treated as constants (not differentiated through)
+        - ⚠️ May miss complex relationships captured by ML models
+        """)
+    
+    with st.expander("🔍 Method 3: Grid Search (Reference)"):
+        st.markdown("""
+        **Brute-Force Grid Search**
+        
+        Evaluates all combinations on a discrete grid. No gradients used.
+        
+        - **Grid**: Upstream [0°, 2°, 4°, ..., 12°] × Downstream [0°, 2°, 4°]
+        - **Evaluations**: 7 × 3 = 21 combinations
+        - **Advantage**: Guaranteed to find global optimum on grid
+        - **Disadvantage**: Limited to grid resolution, doesn't find exact optimum
+        """)
+    
+    # Explain the conversion
+    with st.expander("ℹ️ Understanding Yaw Misalignment ↔ Nacelle Direction"):
+        st.markdown("""
+        **Conversion between Yaw Misalignment and Nacelle Direction:**
+        
+        The ML models (Wake Flow ROM and Power Predictor) use **nacelle direction** as input, 
+        while the optimizer works with **yaw misalignment** angles.
+        
+        | Yaw Misalignment | Nacelle Direction | Description |
+        |-----------------|-------------------|-------------|
+        | 0° | 270° | Aligned with wind (no steering) |
+        | 5° | 275° | Mild wake steering |
+        | 10° | 280° | Moderate wake steering |
+        | 12° | 282° | Aggressive wake steering |
+        | 15° | 285° | Maximum misalignment (training limit) |
+        
+        **Formula:** `nacelle_direction = 270° + yaw_misalignment`
+        
+        The optimizer searches for optimal misalignment in the range **0° - 12°** 
+        (nacelle direction 270° - 282°) to stay within well-validated ROM range.
+        """)
+    
+    status_text.text("🔄 Agent 3: Running two-turbine wake steering optimization...")
+    time.sleep(0.5)
+    
+    with st.spinner(f"Optimizing yaw misalignment using {opt_method.replace('_', ' ').title()} method..."):
+        progress_bar.progress(48)
+        
+        try:
+            power_agent, wake_agent = load_agents()
             
-            expert = get_expert_recommendation(
-                weather["wind_speed_ms"], 
-                weather["wind_direction_deg"]
+            # Run the optimizer with selected method
+            opt_results = optimize_two_turbine_farm(
+                power_agent=power_agent,
+                wake_agent=wake_agent,
+                turbine_spacing_D=7.0,
+                n_timesteps=min(n_timesteps, 30),  # Faster for optimization
+                verbose=False,
+                optimization_method=opt_method  # Use selected method
             )
-            results["expert"] = expert
-            progress_bar.progress(50)
-        
-        st.info(f"🎯 **Recommended Yaw Angle: {expert['suggested_yaw']:.1f}°**")
-        
-        ecol1, ecol2 = st.columns(2)
-        with ecol1:
-            st.metric("Operating Region", expert['operating_region'])
-        with ecol2:
-            st.metric("Expected Efficiency", f"{expert['expected_efficiency']*100:.1f}%")
-        
-        with st.expander("View Expert Reasoning"):
-            for reason in expert['reasoning']:
-                st.write(f"• {reason}")
-    
-    st.markdown("---")
-    
-    # Pause to simulate agents loading ML models
-    time.sleep(1.5)
-    
-    # =========================================================================
-    # AGENT 3 & 4: ML Predictions
-    # =========================================================================
-    st.markdown("### 🔬 Physics-Based Machine Learning Analysis (SINTEF)")
-    st.markdown("""
-    <div class="info-box">
-    Now running physics-informed ML models developed at <b>SINTEF Digital</b> to predict:
-    <ul>
-        <li><b>Power Output:</b> Using Gaussian Process regression trained on CFD data</li>
-        <li><b>Wake Flow Field:</b> Using TT-OpInf (Tensor-Train Operator Inference) model</li>
-    </ul>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    col3, col4 = st.columns(2)
-    
-    # AGENT 3: Power Prediction
-    with col3:
-        st.markdown("#### ⚡ Agent 3: Power Predictor")
-        
-        status_text.text("🔄 Agent 3: Loading SINTEF ML models...")
-        time.sleep(0.5)
-        with st.spinner("Loading ML power prediction model..."):
-            status_text.text("Agent 3: Running Gaussian Process power prediction...")
-            progress_bar.progress(60)
             
-            try:
-                power_agent, wake_agent = load_agents()
-                
-                power_results = power_agent.predict(
-                    yaw_angle=expert['suggested_yaw'],
-                    n_time_points=n_timesteps,
-                    return_samples=True,
-                    n_samples=50
+            results["optimizer"] = opt_results
+            progress_bar.progress(52)
+            
+            st.success(f"✅ Wake steering optimization complete! Method: **{opt_results['optimization_method']}**")
+            
+            # Display optimization results
+            st.markdown("#### 📊 Optimization Results")
+            
+            opt_col1, opt_col2 = st.columns(2)
+            
+            # Get wind direction from weather agent (Agent 1)
+            wind_dir = weather.get('wind_direction_deg', 270)
+            
+            with opt_col1:
+                st.markdown("**🔹 Upstream Turbine (T1)**")
+                # Calculate actual yaw = wind direction + misalignment
+                actual_yaw_T1 = wind_dir + opt_results['optimal_upstream_misalignment']
+                st.metric(
+                    "Optimal Yaw Misalignment", 
+                    f"{opt_results['optimal_upstream_misalignment']:.0f}°",
+                    delta=f"Actual Yaw: {actual_yaw_T1:.0f}°"
                 )
+                st.metric(
+                    "Power Output", 
+                    f"{opt_results['optimal_upstream_power']:.3f} MW"
+                )
+            
+            with opt_col2:
+                st.markdown("**🔹 Downstream Turbine (T2)**")
+                # Calculate actual yaw = wind direction + misalignment
+                actual_yaw_T2 = wind_dir + opt_results['optimal_downstream_misalignment']
+                st.metric(
+                    "Optimal Yaw Misalignment", 
+                    f"{opt_results['optimal_downstream_misalignment']:.0f}°",
+                    delta=f"Actual Yaw: {actual_yaw_T2:.0f}°"
+                )
+                st.metric(
+                    "Power Output", 
+                    f"{opt_results['optimal_downstream_power']:.3f} MW"
+                )
+            
+            st.markdown("---")
+            
+            # Total farm power comparison
+            st.markdown("#### ⚡ Farm Power Comparison")
+            
+            farm_col1, farm_col2, farm_col3 = st.columns(3)
+            
+            with farm_col1:
+                st.metric(
+                    "Baseline (0° misalign)", 
+                    f"{opt_results['baseline_total_power']:.3f} MW"
+                )
+            
+            with farm_col2:
+                st.metric(
+                    "Optimized Total", 
+                    f"{opt_results['optimal_total_power']:.3f} MW"
+                )
+            
+            with farm_col3:
+                gain_color = "normal" if opt_results['power_gain_percent'] >= 0 else "inverse"
+                st.metric(
+                    "Power Gain", 
+                    f"{opt_results['power_gain_MW']:.3f} MW",
+                    delta=f"{opt_results['power_gain_percent']:+.1f}%"
+                )
+            
+            # Visualization of optimization results
+            st.markdown("#### 📈 Optimization Landscape")
+            
+            # Create heatmap of power vs misalignment angles
+            all_results = opt_results['all_results']
+            
+            # Extract unique values
+            up_misaligns = sorted(set(r['upstream_misalignment'] for r in all_results))
+            down_misaligns = sorted(set(r['downstream_misalignment'] for r in all_results))
+            
+            # Create power matrix
+            power_matrix = np.zeros((len(down_misaligns), len(up_misaligns)))
+            for r in all_results:
+                i = down_misaligns.index(r['downstream_misalignment'])
+                j = up_misaligns.index(r['upstream_misalignment'])
+                power_matrix[i, j] = r['total_power']
+            
+            fig, ax = plt.subplots(figsize=(10, 5))
+            im = ax.imshow(power_matrix, cmap='YlOrRd', aspect='auto', origin='lower')
+            ax.set_xticks(range(len(up_misaligns)))
+            ax.set_xticklabels([f'{m:.0f}°' for m in up_misaligns])
+            ax.set_yticks(range(len(down_misaligns)))
+            ax.set_yticklabels([f'{m:.0f}°' for m in down_misaligns])
+            ax.set_xlabel('Upstream Turbine Yaw Misalignment')
+            ax.set_ylabel('Downstream Turbine Yaw Misalignment')
+            ax.set_title('Total Farm Power (MW) vs Yaw Misalignment')
+            
+            # Mark optimal point
+            opt_i = down_misaligns.index(opt_results['optimal_downstream_misalignment'])
+            opt_j = up_misaligns.index(opt_results['optimal_upstream_misalignment'])
+            ax.plot(opt_j, opt_i, 'w*', markersize=20, markeredgecolor='black', markeredgewidth=2)
+            ax.annotate('Optimal', (opt_j, opt_i), xytext=(opt_j+0.5, opt_i+0.3), 
+                       fontsize=10, color='white', fontweight='bold')
+            
+            plt.colorbar(im, label='Total Power (MW)')
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+            
+            # Store optimal nacelle directions for use in subsequent agents (ML model input)
+            results["optimal_nacelle_upstream"] = opt_results['optimal_upstream_nacelle']
+            results["optimal_nacelle_downstream"] = opt_results['optimal_downstream_nacelle']
+            
+            # Store actual yaw angles (wind direction + misalignment) for reporting
+            results["actual_yaw_upstream"] = wind_dir + opt_results['optimal_upstream_misalignment']
+            results["actual_yaw_downstream"] = wind_dir + opt_results['optimal_downstream_misalignment']
+            
+            # Show optimization method used
+            opt_method = opt_results.get('optimization_method', 'Grid Search')
+            st.info(f"🔧 **Optimization Method:** {opt_method}")
+            
+            # Convergence plot for gradient-based optimization
+            if 'Gradient' in opt_method and len(all_results) > 1 and 'iteration' in all_results[0]:
+                st.markdown("#### 📉 Optimization Convergence")
                 
-                mean_power = np.mean(power_results['power_mean_MW'])
-                max_power = np.max(power_results['power_mean_MW'])
-                uncertainty = np.mean(power_results['power_std_MW'])
+                fig_conv, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
                 
-                results["power"] = {
-                    "mean_MW": mean_power,
-                    "max_MW": max_power,
-                    "uncertainty_MW": uncertainty,
-                    "time_series": power_results
-                }
+                iterations = [r['iteration'] for r in all_results]
+                powers = [r['total_power'] for r in all_results]
+                grad_norms = [r.get('gradient_norm', 0) for r in all_results]
+                up_misaligns = [r['upstream_misalignment'] for r in all_results]
                 
-                progress_bar.progress(70)
+                # Power convergence
+                ax1.plot(iterations, powers, 'b-', linewidth=2, marker='o', markersize=3)
+                ax1.set_xlabel('Iteration')
+                ax1.set_ylabel('Total Farm Power (MW)')
+                ax1.set_title('Power Maximization Convergence')
+                ax1.grid(True, alpha=0.3)
+                ax1.axhline(y=max(powers), color='g', linestyle='--', alpha=0.7, label=f'Best: {max(powers):.4f} MW')
+                ax1.legend()
                 
-                st.success(f"✅ Power prediction complete!")
+                # Gradient norm (convergence indicator)
+                ax2.semilogy(iterations, [g + 1e-10 for g in grad_norms], 'r-', linewidth=2, marker='s', markersize=3)
+                ax2.set_xlabel('Iteration')
+                ax2.set_ylabel('Gradient Norm (log scale)')
+                ax2.set_title('Gradient Convergence')
+                ax2.grid(True, alpha=0.3)
+                ax2.axhline(y=1e-4, color='g', linestyle='--', alpha=0.7, label='Convergence threshold')
+                ax2.legend()
                 
-                # Display mean power as info box
-                st.info(f"📊 **Time-Averaged Mean Power:** {mean_power:.3f} MW ± {uncertainty:.3f} MW")
-                
-                # Power plot showing transient samples (not just the mean)
-                fig, ax = plt.subplots(figsize=(8, 4))
-                t = power_results['normalized_time']
-                
-                # Plot several posterior samples to show transient variability
-                if 'samples' in power_results and power_results['samples'] is not None:
-                    samples = power_results['samples']
-                    # Plot up to 20 samples in light colors to show variability
-                    n_plot_samples = min(20, samples.shape[0])
-                    for i in range(n_plot_samples):
-                        ax.plot(t, samples[i], 'steelblue', alpha=0.15, linewidth=0.8)
-                    # Plot one sample prominently as "representative transient"
-                    ax.plot(t, samples[0], 'b-', linewidth=1.5, label='Transient Sample', alpha=0.8)
-                
-                # Also show the mean as dashed line
-                ax.plot(t, power_results['power_mean_MW'], 'r--', linewidth=1.5, 
-                       label=f'Mean ({mean_power:.3f} MW)', alpha=0.9)
-                
-                # Show 95% CI as shaded region
-                ax.fill_between(t, power_results['power_lower_95_MW'], 
-                              power_results['power_upper_95_MW'],
-                              alpha=0.15, color='gray', label='95% CI')
-                
-                ax.set_xlabel('Normalized Time')
-                ax.set_ylabel('Power (MW)')
-                ax.set_title(f'Transient Power Prediction at Yaw = {expert["suggested_yaw"]:.1f}°')
-                ax.legend(loc='best', fontsize=8)
-                ax.grid(True, alpha=0.3)
                 plt.tight_layout()
-                st.pyplot(fig)
+                st.pyplot(fig_conv)
                 plt.close()
-                
-            except Exception as e:
-                st.error(f"Power prediction failed: {e}")
-                results["power"] = None
-    
-    # AGENT 4: Wake Flow
-    with col4:
-        st.markdown("#### 🌊 Agent 4: Wake Flow Simulator")
-        
-        time.sleep(0.8)  # Pause to simulate agent starting
-        status_text.text("🔄 Agent 4: Initializing TT-OpInf model...")
-        time.sleep(0.5)
-        with st.spinner("Running TT-OpInf wake flow simulation..."):
-            status_text.text("Agent 4: Computing 3D velocity field using TT-OpInf...")
-            progress_bar.progress(80)
             
-            try:
-                power_agent, wake_agent = load_agents()
-                
-                predictions, vtk_dir = wake_agent.predict(
-                    yaw_angle=expert['suggested_yaw'],
-                    n_timesteps=n_timesteps,
-                    export_vtk=export_vtk,
-                    export_every=5,
-                    verbose=False
-                )
-                
-                velocity_mag = np.linalg.norm(predictions, axis=2)
-                
-                results["wake"] = {
-                    "predictions": predictions,
-                    "velocity_mag": velocity_mag,
-                    "vtk_dir": vtk_dir,
-                    "shape": predictions.shape
-                }
-                
-                progress_bar.progress(90)
-                
-                st.success(f"✅ Wake simulation complete!")
-                
-                wcol1, wcol2 = st.columns(2)
-                with wcol1:
-                    st.metric("Spatial Points", f"{predictions.shape[1]:,}")
-                with wcol2:
-                    st.metric("Timesteps", predictions.shape[0])
-                
-                st.write(f"Velocity range: {velocity_mag.min():.2f} - {velocity_mag.max():.2f} m/s")
-                
-                if vtk_dir:
-                    st.info(f"📁 VTK files saved to: `{vtk_dir}`")
-                
-            except Exception as e:
-                st.error(f"Wake simulation failed: {e}")
-                import traceback
-                st.code(traceback.format_exc())
-                results["wake"] = None
+            with st.expander("📋 View All Optimization Iterations"):
+                import pandas as pd
+                df_results = pd.DataFrame(all_results)
+                if 'upstream_misalignment' in df_results.columns:
+                    df_results['upstream_nacelle'] = df_results['upstream_misalignment'].apply(
+                        yaw_misalignment_to_nacelle_direction
+                    )
+                    df_results['downstream_nacelle'] = df_results['downstream_misalignment'].apply(
+                        yaw_misalignment_to_nacelle_direction
+                    )
+                df_results = df_results.round(4)
+                st.dataframe(df_results, use_container_width=True)
+            
+        except Exception as e:
+            st.error(f"Optimization failed: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+            results["optimizer"] = None
     
-    progress_bar.progress(95)
-    
-    # =========================================================================
-    # Animation Display
-    # =========================================================================
-    st.markdown("---")
-    st.markdown("### 🎬 Wake Flow Animation")
-    st.markdown("""
-    <div class="info-box">
-    Creating ParaView-style visualization using the actual VTK mesh data and TT-OpInf predictions.
-    <br><br>
-    <b>⚠️ Note:</b> Resolution has been reduced (10,000 of 180,857 points sampled) to enable 
-    real-time visualization in the browser. For full-resolution analysis, use the exported VTK 
-    files in ParaView.
+    # Arrow from Agent 3 to Agent 4
+    st.markdown('''
+    <div style="text-align: center; font-size: 2.5rem; color: #1E88E5; margin: 15px 0;">
+    ⬇️
     </div>
-    """, unsafe_allow_html=True)
+    <div style="text-align: center; font-size: 0.85rem; color: #666; margin-bottom: 15px;">
+    Optimal Nacelle Directions → Agent 4 (Wake Flow Simulation)
+    </div>
+    ''', unsafe_allow_html=True)
     
-    if results.get("wake") is not None:
-        with st.spinner("Generating wake flow animation from VTK data..."):
-            status_text.text("Creating ParaView-style visualization...")
+    time.sleep(0.8)
+    
+    # =========================================================================
+    # AGENT 4: Wind Turbine Wake Flow at Recommended Yaw Angle: A Reduced Order Model.
+    # =========================================================================
+    st.markdown("### 🌊 Agent 4: Wind Turbine Wake Flow: A Reduced Order Model")
+    st.markdown('''
+    <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
+    <b>Parametric Reduced Order Model</b> based on hi-fidelity CFD data.
+    based on <b>Tensor Decomposition + Radial Basis Function + Operator Inference</b>.
+    Contact: mandar.tabib@sintef.no for details.
+</p>
+    ''', unsafe_allow_html=True)
+    
+    # Use the optimal nacelle direction from the optimizer (Agent 3)
+    # Note: This is the ML model input (270°-285°), which is a proxy for yaw misalignment (0°-15°)
+    # The actual turbine yaw = wind_direction + yaw_misalignment
+    optimal_yaw_ml = results.get("optimal_nacelle_upstream", expert['suggested_yaw'])
+    actual_yaw_upstream = results.get("actual_yaw_upstream", weather.get('wind_direction_deg', 270))
+    optimal_misalign_upstream = opt_results['optimal_upstream_misalignment'] if opt_results else 0
+    
+    st.markdown(f"""**Running wake simulation:**
+- ML Model Input (Nacelle Dir): **{optimal_yaw_ml:.1f}°** (proxy for {optimal_misalign_upstream:.0f}° misalignment)
+- Actual Turbine Yaw: **{actual_yaw_upstream:.0f}°** (= {weather.get('wind_direction_deg', 270):.0f}° wind dir + {optimal_misalign_upstream:.0f}° misalign)
+""")
+    
+    status_text.text("🔄 Agent 4: Initializing TD-RBF-OpInf model...")
+    time.sleep(0.5)
+    with st.spinner("Running ROM: A TD-RBF-OpInf wake flow simulator..."):
+        status_text.text("Agent 4: Computing velocity field using TD-RBF-OpInf...")
+        progress_bar.progress(60)
+        
+        try:
+            power_agent, wake_agent = load_agents()
             
-            try:
-                # Import the animation module
-                from wake_animation import create_wake_contour_animation
+            predictions, vtk_dir = wake_agent.predict(
+                yaw_angle=optimal_yaw_ml,
+                n_timesteps=n_timesteps,
+                export_vtk=export_vtk,
+                export_every=5,
+                verbose=False
+            )
+            
+            velocity_mag = np.linalg.norm(predictions, axis=2)
+            
+            results["wake"] = {
+                "predictions": predictions,
+                "velocity_mag": velocity_mag,
+                "vtk_dir": vtk_dir,
+                "shape": predictions.shape
+            }
+            
+            progress_bar.progress(65)
+            
+            st.success(f"✅ Wake simulation complete!")
+            
+            wcol1, wcol2 = st.columns(2)
+            with wcol1:
+                st.metric("Spatial Points", f"{predictions.shape[1]:,}")
+            with wcol2:
+                st.metric("Timesteps", predictions.shape[0])
+            
+            if vtk_dir:
+                st.info(f"📁 VTK files saved to: `{vtk_dir}`")
+            
+            # Generate wake flow animation
+            progress_bar.progress(70)
+            st.markdown("#### 🎬 Wake Flow Animation")
+            
+            with st.spinner("Generating wake flow animation..."):
+                status_text.text("Creating ParaView-style visualization...")
                 
-                # Create animation using actual VTK grid data
-                anim_path = os.path.join(SCRIPT_DIR, "wake_animation.gif")
-                
-                # Use the contour animation which interpolates actual data
-                grid_path = str(PROJECT_ROOT / "ResultMLYaw" / "Grid_data.vtk")
-                
-                create_wake_contour_animation(
-                    predictions=results["wake"]["predictions"],
-                    grid_path=grid_path,
-                    output_path=anim_path,
-                    fps=8,
-                    frame_skip=max(1, results["wake"]["predictions"].shape[0] // 20),
-                    cmap="RdYlBu_r",
-                    verbose=False
-                )
-                
-                # Display animation
-                st.image(anim_path, caption="Wake Flow Evolution (TT-OpInf Model - Actual VTK Data)")
-                
-                # Download button
-                with open(anim_path, "rb") as f:
-                    st.download_button(
-                        label="📥 Download Animation",
-                        data=f,
-                        file_name="wake_animation.gif",
-                        mime="image/gif"
+                try:
+                    from wake_animation import create_wake_contour_animation
+                    
+                    anim_path = os.path.join(SCRIPT_DIR, "wake_animation_optimal.gif")
+                    grid_path = str(PROJECT_ROOT / "ResultMLYaw" / "Grid_data.vtk")
+                    
+                    create_wake_contour_animation(
+                        predictions=predictions,
+                        grid_path=grid_path,
+                        output_path=anim_path,
+                        fps=8,
+                        frame_skip=max(1, predictions.shape[0] // 20),
+                        cmap="RdYlBu_r",
+                        verbose=False,
+                        yaw_angle=optimal_yaw_ml
                     )
                     
-            except Exception as e:
-                st.warning(f"Could not create animation: {e}")
+                    st.image(anim_path, caption=f"Wake Flow (ML input: {optimal_yaw_ml:.0f}°, Actual Yaw: {actual_yaw_upstream:.0f}°)")
+                    
+                    with open(anim_path, "rb") as f:
+                        st.download_button(
+                            label="📥 Download Animation",
+                            data=f,
+                            file_name=f"wake_animation_misalign_{optimal_misalign_upstream:.0f}deg.gif",
+                            mime="image/gif",
+                            key="download_wake_optimal"
+                        )
+                        
+                except Exception as anim_e:
+                    st.warning(f"Could not create animation: {anim_e}")
+            
+        except Exception as e:
+            st.error(f"Wake simulation failed: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+            results["wake"] = None
+    
+    # Arrow from Agent 4 to Agent 5
+    st.markdown('''
+    <div style="text-align: center; font-size: 2.5rem; color: #1E88E5; margin: 15px 0;">
+    ⬇️
+    </div>
+    <div style="text-align: center; font-size: 0.85rem; color: #666; margin-bottom: 15px;">
+    Yaw Angle → Agent 5 (Power Prediction)
+    </div>
+    ''', unsafe_allow_html=True)
+    
+    time.sleep(0.9)
+    
+    # =========================================================================
+    # AGENT 5: Power Predictor
+    # =========================================================================
+    st.markdown("### ⚡ Agent 5: Power Predictor")
+    st.markdown('''
+    <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
+    Gaussian Process Regression trained on high-fidelity CFD simulation data.
+    </p>
+    ''', unsafe_allow_html=True)
+    
+    # Use the optimal nacelle direction from the optimizer (Agent 3)
+    # Note: This is the ML model input (270°-285°), which is a proxy for yaw misalignment (0°-15°)
+    optimal_yaw_power_ml = results.get("optimal_nacelle_upstream", expert['suggested_yaw'])
+    
+    st.markdown(f"""**Running power prediction:**
+- ML Model Input (Nacelle Dir): **{optimal_yaw_power_ml:.1f}°** (proxy for {optimal_misalign_upstream:.0f}° misalignment)
+- Actual Turbine Yaw: **{actual_yaw_upstream:.0f}°** (= {weather.get('wind_direction_deg', 270):.0f}° wind dir + {optimal_misalign_upstream:.0f}° misalign)
+""")
+    
+    status_text.text("🔄 Agent 5: Loading SINTEF ML models...")
+    time.sleep(0.5)
+    with st.spinner("Running Gaussian Process power prediction..."):
+        status_text.text("Agent 5: Computing power output with uncertainty quantification...")
+        progress_bar.progress(80)
+        
+        try:
+            power_agent, wake_agent = load_agents()
+            
+            power_results = power_agent.predict(
+                yaw_angle=optimal_yaw_power_ml,
+                n_time_points=n_timesteps,
+                return_samples=True,
+                n_samples=50
+            )
+            
+            mean_power = np.mean(power_results['power_mean_MW'])
+            max_power = np.max(power_results['power_mean_MW'])
+            uncertainty = np.mean(power_results['power_std_MW'])
+            
+            results["power"] = {
+                "mean_MW": mean_power,
+                "max_MW": max_power,
+                "uncertainty_MW": uncertainty,
+                "time_series": power_results
+            }
+            
+            progress_bar.progress(85)
+            
+            st.success(f"✅ Power prediction complete!")
+            
+            # Display power metrics
+            pcol1, pcol2, pcol3 = st.columns(3)
+            with pcol1:
+                st.metric("Mean Power", f"{mean_power:.3f} MW")
+            with pcol2:
+                st.metric("Peak Power", f"{max_power:.3f} MW")
+            with pcol3:
+                st.metric("Uncertainty (±1σ)", f"±{uncertainty:.3f} MW")
+            
+            # Power plot showing transient samples
+            fig, ax = plt.subplots(figsize=(10, 4))
+            t = power_results['normalized_time']
+            
+            # Plot posterior samples
+            if 'samples' in power_results and power_results['samples'] is not None:
+                samples = power_results['samples']
+                n_plot_samples = min(20, samples.shape[0])
+                for i in range(n_plot_samples):
+                    ax.plot(t, samples[i], 'steelblue', alpha=0.15, linewidth=0.8)
+                ax.plot(t, samples[0], 'b-', linewidth=1.5, label='Transient Sample', alpha=0.8)
+            
+            ax.plot(t, power_results['power_mean_MW'], 'r--', linewidth=1.5, 
+                   label=f'Mean ({mean_power:.3f} MW)', alpha=0.9)
+            
+            ax.fill_between(t, power_results['power_lower_95_MW'], 
+                          power_results['power_upper_95_MW'],
+                          alpha=0.15, color='gray', label='95% CI')
+            
+            ax.set_xlabel('Normalized Time')
+            ax.set_ylabel('Power (MW)')
+            ax.set_title(f'Power Prediction (Misalign: {optimal_misalign_upstream:.0f}°, Actual Yaw: {actual_yaw_upstream:.0f}°)')
+            ax.legend(loc='best', fontsize=8)
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+            
+        except Exception as e:
+            st.error(f"Power prediction failed: {e}")
+            results["power"] = None
+    
+    progress_bar.progress(95)
     
     progress_bar.progress(100)
     status_text.text("✅ Analysis complete!")
@@ -759,6 +2047,27 @@ def display_summary_report(results):
     expert = results.get("expert", {})
     power = results.get("power", {})
     wake = results.get("wake", {})
+    optimizer = results.get("optimizer", {})
+    
+    # Get wind direction for actual yaw calculation
+    wind_dir = weather.get('wind_direction_deg', 270)
+    
+    # Use optimizer results for recommended yaw if available
+    if optimizer:
+        opt_upstream = optimizer.get('optimal_upstream_misalignment', 0)
+        opt_downstream = optimizer.get('optimal_downstream_misalignment', 0)
+        opt_method = optimizer.get('optimization_method', 'N/A')
+        power_gain = optimizer.get('power_gain_percent', 0)
+        # Calculate actual yaw angles: wind_direction + misalignment
+        actual_yaw_T1 = wind_dir + opt_upstream
+        actual_yaw_T2 = wind_dir + opt_downstream
+        # Report both misalignment and actual yaw
+        recommended_yaw_str = f"T1: {opt_upstream:.1f}° → {actual_yaw_T1:.0f}°, T2: {opt_downstream:.1f}° → {actual_yaw_T2:.0f}° (via {opt_method})"
+    else:
+        recommended_yaw_str = f"{expert.get('suggested_yaw', 0):.1f}°"
+        power_gain = 0
+        actual_yaw_T1 = wind_dir
+        actual_yaw_T2 = wind_dir
     
     report_md = f"""
 | Parameter | Value |
@@ -767,17 +2076,56 @@ def display_summary_report(results):
 | **Timestamp** | {results.get('timestamp', 'N/A')} |
 | **Wind Speed** | {weather.get('wind_speed_ms', 0):.1f} m/s |
 | **Wind Direction** | {weather.get('wind_direction_deg', 0):.0f}° |
-| **Recommended Yaw** | {expert.get('suggested_yaw', 0):.1f}° |
+| **Optimal Yaw (Misalign → Actual)** | {recommended_yaw_str} |
+| **Farm Power Gain** | {power_gain:+.1f}% |
 | **Operating Region** | {expert.get('operating_region', 'N/A')} |
 | **Predicted Power** | {power.get('mean_MW', 0):.3f} ± {power.get('uncertainty_MW', 0):.3f} MW |
 | **Wake Field Points** | {wake.get('shape', [0,0,0])[1] if wake else 'N/A':,} |
 | **Simulation Steps** | {wake.get('shape', [0,0,0])[0] if wake else 'N/A'} |
+
+*Note: Actual Yaw = Wind Direction + Yaw Misalignment (ML input 270°-285° is proxy for misalignment 0°-15°)*
 """
     
     st.markdown(report_md)
     
     # Export button
     if st.button("📄 Export Full Report"):
+        # Build optimizer section for export
+        if optimizer:
+            opt_up_misalign = optimizer.get('optimal_upstream_misalignment', 0)
+            opt_down_misalign = optimizer.get('optimal_downstream_misalignment', 0)
+            # Calculate actual yaw = wind direction + misalignment
+            actual_yaw_T1_export = wind_dir + opt_up_misalign
+            actual_yaw_T2_export = wind_dir + opt_down_misalign
+            
+            optimizer_section = f"""
+WAKE STEERING OPTIMIZATION
+--------------------------
+Optimization Method: {optimizer.get('optimization_method', 'N/A')}
+
+Note: Actual Yaw = Wind Direction + Yaw Misalignment
+      (ML model input 270°-285° is a proxy for misalignment 0°-15°)
+
+Upstream Turbine (T1):
+  - Optimal Yaw Misalignment: {opt_up_misalign:.1f}°
+  - Actual Yaw Angle: {actual_yaw_T1_export:.1f}° (= {wind_dir:.0f}° + {opt_up_misalign:.1f}°)
+  - ML Model Input (Nacelle Dir): {optimizer.get('optimal_upstream_nacelle', 0):.1f}°
+  - Power Output: {optimizer.get('optimal_upstream_power', 0):.3f} MW
+
+Downstream Turbine (T2):
+  - Optimal Yaw Misalignment: {opt_down_misalign:.1f}°
+  - Actual Yaw Angle: {actual_yaw_T2_export:.1f}° (= {wind_dir:.0f}° + {opt_down_misalign:.1f}°)
+  - ML Model Input (Nacelle Dir): {optimizer.get('optimal_downstream_nacelle', 0):.1f}°
+  - Power Output: {optimizer.get('optimal_downstream_power', 0):.3f} MW
+
+Total Farm Power:
+  - Baseline (0° misalign): {optimizer.get('baseline_total_power', 0):.3f} MW
+  - Optimized: {optimizer.get('optimal_total_power', 0):.3f} MW
+  - Power Gain: {optimizer.get('power_gain_MW', 0):.3f} MW ({optimizer.get('power_gain_percent', 0):+.1f}%)
+"""
+        else:
+            optimizer_section = ""
+        
         report_text = f"""
 WIND TURBINE MULTI-AGENT ANALYSIS REPORT
 ========================================
@@ -795,9 +2143,9 @@ EXPERT RECOMMENDATION
 ---------------------
 Turbine: NREL 5MW Reference Wind Turbine
 Operating Region: {expert.get('operating_region', 'N/A')}
-Recommended Yaw: {expert.get('suggested_yaw', 0):.1f}°
+Real-World Yaw (aligned): {expert.get('actual_yaw', 0):.1f}°
 Expected Efficiency: {expert.get('expected_efficiency', 0)*100:.1f}%
-
+{optimizer_section}
 POWER PREDICTION (SINTEF ML Model)
 ----------------------------------
 Mean Power Output: {power.get('mean_MW', 0):.3f} MW
@@ -811,7 +2159,7 @@ Velocity Components: 3 (Ux, Uy, Uz)
 
 ========================================
 Report generated by Wind Turbine Multi-Agent System
-Developed at SINTEF Digital
+Developed at SINTEF Energy Research
 """
         st.download_button(
             label="Download Report (TXT)",
