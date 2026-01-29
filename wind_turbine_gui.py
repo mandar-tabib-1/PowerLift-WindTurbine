@@ -1224,6 +1224,7 @@ def main():
     </p>
     ''', unsafe_allow_html=True)
     
+
     st.markdown("""
     <div class="info-box">
     <b>Welcome!</b> This system involves developing/testing multiple agents involving AI to analyze wind turbine operations:
@@ -1231,6 +1232,24 @@ def main():
         <li><b>Agent 1:</b> Weather Station - Fetches real-time wind conditions</li>
         <li><b>Agent 2:</b> Turbine Expert - Consults NREL 5MW manual for optimal yaw</li>
         <li><b>Agent 2B:</b> LLM-based Turbine Expert - Uses local LLM for intelligent recommendations</li>
+    </ul>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Justification paragraph between Agent 2B and Agent 3
+    st.markdown(
+        """
+        <div class="info-box">
+        <b>Why optimize for two turbines?</b><br>
+        Agent 3 (Two-Turbine Wake Steering Optimizer) is designed to maximize wind farm power by considering the aerodynamic interaction between pairs of turbines. In real wind farms, the wake from an upstream turbine can significantly reduce the power output of downstream turbines. By automatically selecting turbine pairs based on their spatial arrangement and prevailing wind direction, the optimizer can apply wake steering strategies (intentional yaw misalignment) to the upstream turbine, deflecting its wake and increasing the total power output of the pair. This approach is both computationally efficient and physically justified, as most wake losses occur between closely spaced turbine pairs. Optimizing at the pair level enables scalable, automated control for larger wind farms.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown("""
+    <div class="info-box">
+    <ul>
         <li><b>Agent 3:</b> Two-Turbine Wake Steering Optimizer - Finds optimal yaw misalignment for farm power maximization</li>
         <li><b>Agent 4:</b> Wind Turbine Wake Flow ROM - Tensor Decomposition + Operator Inference model</li>
         <li><b>Agent 5:</b> Wind Turbine Power Predictor - Gaussian Process Regressor trained at SINTEF</li>
