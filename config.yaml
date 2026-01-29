@@ -1,0 +1,15 @@
+# Agent 2B: LLM Configuration
+# This file contains configuration settings for the local LLM server
+
+llm:
+  # API Configuration
+  api_key: "sk-48COknyy7BlFg8vbN1ywgg"  # Replace with your actual API key
+  api_base: "https://llm.hpc.ntnu.no/v1"  # Base URL of your local LLM server
+  
+  # Model Configuration
+  model: "moonshotai/Kimi-K2.5"  # LLM model name
+  
+  # Generation Parameters
+  temperature: 0.1  # Lower = more deterministic, Higher = more creative
+  max_tokens: 200000  # Maximum tokens for output generation
+  timeout: 1000.0  # Request timeout in seconds

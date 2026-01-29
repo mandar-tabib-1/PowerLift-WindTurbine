@@ -4,7 +4,7 @@ Wind Turbine Multi-Agent Orchestrator - GUI Version
 A Streamlit-based graphical interface for the wind turbine analysis system.
 Run with: streamlit run wind_turbine_gui.py
 
-& ".\.venv\Scripts\python.exe" -m streamlit run wind_turbine_gui.py --server.port 8505
+& ".\.venv\Scripts\python.exe" -m streamlit run wind_turbine_gui.py --server.port 8506
 """
 
 import streamlit as st
@@ -18,6 +18,10 @@ import sys
 import torch
 from pathlib import Path
 from datetime import datetime
+import openai
+
+#To do,
+#I get the error ⚠️ Agent 2B: Could not connect to LLM. Error: query_local_llm() got an unexpected keyword argument 'temperature' . I have added a new folder called LLM that could be useful with ntnu_llm.py and base.py , and it could be useful for connecting to the specfic Ntnu server where the local llm is. 
 
 # Add parent directories to path
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -372,6 +376,168 @@ def get_expert_recommendation(wind_speed: float, wind_direction: float):
         "rom_explanation": rom_explanation,
         "rom_yaw_range": (rom_yaw_min, rom_yaw_max),
         "turbine_specs": turbine_specs
+    }
+
+
+# =============================================================================
+# Agent 2B: LLM-based Turbine Expert Functions
+# =============================================================================
+def load_llm_config(config_path: str = None):
+    """
+    Load LLM configuration from YAML file.
+    
+    Parameters:
+    -----------
+    config_path : str, optional
+        Path to the config.yaml file. If None, uses default path.
+    
+    Returns:
+    --------
+    dict
+        Configuration dictionary
+    """
+    import yaml
+    
+    if config_path is None:
+        config_path = os.path.join(SCRIPT_DIR, "config.yaml")
+    
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        return config.get('llm', {})
+    except FileNotFoundError:
+        st.warning(f"⚠️ Config file not found at {config_path}. Using default values.")
+        return {
+            'api_key': '<INSERT_YOUR_API_KEY_HERE>',
+            'api_base': 'http://localhost:8000/v1',
+            'model': 'moonshotai/Kimi-K2.5',
+            'temperature': 0.1,
+            'max_tokens': 200000,
+            'timeout': 1000.0
+        }
+    except Exception as e:
+        st.error(f"Error loading config: {e}")
+        return {}
+
+
+def query_local_llm(api_key: str, api_base: str, model_name: str, prompt: str, system_message: str = None, temperature: float = 0.7, max_tokens: int = 1000, timeout: float = None):
+    """
+    Query the local LLM using OpenAI-compatible API (openai>=1.0.0 interface).
+    
+    Parameters:
+    -----------
+    api_key : str
+        API key to authenticate with the local LLM server
+    api_base : str
+        Base URL of the local LLM server (e.g., "http://localhost:8000/v1")
+    model_name : str
+        Name of the LLM model (e.g., "moonshotai/Kimi-K2.5")
+    prompt : str
+        The user prompt/query for the LLM
+    system_message : str, optional
+        System message to set the context for the LLM
+    temperature : float, optional
+        Sampling temperature for the LLM (default: 0.7)
+    max_tokens : int, optional
+        Maximum number of tokens to generate (default: 1000)
+    timeout : float, optional
+        Timeout for the API request (default: None)
+
+    Returns:
+    --------
+    str
+        The response from the LLM
+    """
+    # Use the new OpenAI API client (>=1.0.0)
+    import openai
+    client = openai.OpenAI(api_key=api_key, base_url=api_base)
+
+    try:
+        messages = []
+        if system_message:
+            messages.append({"role": "system", "content": system_message})
+        messages.append({"role": "user", "content": prompt})
+
+        create_kwargs = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        if timeout is not None:
+            create_kwargs["timeout"] = timeout
+
+        response = client.chat.completions.create(**create_kwargs)
+        return response.choices[0].message.content
+
+    except Exception as e:
+        return f"Error querying the LLM: {str(e)}"
+
+
+def get_llm_expert_recommendation(wind_speed: float, wind_direction: float, config: dict = None):
+    """
+    Use the local LLM to get expert recommendations for yaw and pitch.
+    
+    Parameters:
+    -----------
+    wind_speed : float
+        Wind speed in m/s
+    wind_direction : float
+        Wind direction in degrees
+    config : dict, optional
+        LLM configuration dictionary. If None, loads from config.yaml
+    
+    Returns:
+    --------
+    dict
+        LLM response with recommendations
+    """
+    # Load config if not provided
+    if config is None:
+        config = load_llm_config()
+    
+    system_message = (
+        "You are an expert in NREL 5 MW wind turbine operations and control. "
+        "You have deep knowledge of turbine specifications, operating regions, "
+        "yaw control, pitch control, and power optimization strategies. "
+        "Provide detailed, technical recommendations based on the given wind conditions."
+    )
+    
+    prompt = (
+        f"Given the following wind conditions:\n"
+        f"- Wind Speed: {wind_speed:.2f} m/s\n"
+        f"- Wind Direction: {wind_direction:.1f}°\n\n"
+        f"For an NREL 5 MW Reference Wind Turbine with the following specifications:\n"
+        f"- Rated Power: 5.0 MW\n"
+        f"- Rotor Diameter: 126 m\n"
+        f"- Hub Height: 90 m\n"
+        f"- Cut-in Wind Speed: 3.0 m/s\n"
+        f"- Rated Wind Speed: 11.4 m/s\n"
+        f"- Cut-out Wind Speed: 25.0 m/s\n\n"
+        f"Please suggest:\n"
+        f"1. The optimal yaw angle (nacelle direction)\n"
+        f"2. The optimal pitch angle\n"
+        f"3. The expected operating region (cut-in, partial load, rated, cut-out)\n"
+        f"4. Detailed explanation of why these settings are chosen\n\n"
+        f"Format your response clearly with labeled sections."
+    )
+    
+    llm_response = query_local_llm(
+        api_key=config.get('api_key', ''),
+        api_base=config.get('api_base', 'http://localhost:8000/v1'),
+        model_name=config.get('model', 'moonshotai/Kimi-K2.5'),
+        prompt=prompt,
+        system_message=system_message,
+        temperature=config.get('temperature', 0.1),
+        max_tokens=config.get('max_tokens', 200000),
+        timeout=config.get('timeout', 1000.0)
+    )
+    
+    return {
+        "llm_response": llm_response,
+        "wind_speed": wind_speed,
+        "wind_direction": wind_direction,
+        "config": config
     }
 
 
@@ -1064,6 +1230,7 @@ def main():
     <ul>
         <li><b>Agent 1:</b> Weather Station - Fetches real-time wind conditions</li>
         <li><b>Agent 2:</b> Turbine Expert - Consults NREL 5MW manual for optimal yaw</li>
+        <li><b>Agent 2B:</b> LLM-based Turbine Expert - Uses local LLM for intelligent recommendations</li>
         <li><b>Agent 3:</b> Two-Turbine Wake Steering Optimizer - Finds optimal yaw misalignment for farm power maximization</li>
         <li><b>Agent 4:</b> Wind Turbine Wake Flow ROM - Tensor Decomposition + Operator Inference model</li>
         <li><b>Agent 5:</b> Wind Turbine Power Predictor - Gaussian Process Regressor trained at SINTEF</li>
@@ -1479,7 +1646,82 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
         for reason in expert['reasoning']:
             st.write(f"• {reason}")
     
-    # Arrow from Agent 2 to Agent 3
+    # Arrow from Agent 2 to Agent 2B
+    st.markdown('''
+    <div style="text-align: center; font-size: 2.5rem; color: #1E88E5; margin: 15px 0;">
+    ⬇️
+    </div>
+    <div style="text-align: center; font-size: 0.85rem; color: #666; margin-bottom: 15px;">
+    Wind Conditions → Agent 2B (LLM Expert)
+    </div>
+    ''', unsafe_allow_html=True)
+    
+    time.sleep(0.9)
+    
+    # =========================================================================
+    # AGENT 2B: LLM-based Turbine Expert
+    # =========================================================================
+    st.markdown("### 🤖 Agent 2B: LLM-based Turbine Expert")
+    st.markdown('''
+    <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
+    Uses local LLM (moonshotai/Kimi-K2.5) to provide intelligent turbine control recommendations.
+    </p>
+    ''', unsafe_allow_html=True)
+    
+    # LLM Configuration - Load from config.yaml
+    llm_config = load_llm_config()
+    
+    status_text.text("🔄 Agent 2B: Loading LLM configuration and querying for expert recommendations...")
+    time.sleep(0.5)
+    
+    with st.spinner("Agent 2B: Consulting LLM for turbine control recommendations..."):
+        try:
+            llm_result = get_llm_expert_recommendation(
+                wind_speed=weather['wind_speed_ms'],
+                wind_direction=weather['wind_direction_deg'],
+                config=llm_config
+            )
+            
+            results['llm_expert'] = llm_result
+            progress_bar.progress(0.4)
+            time.sleep(0.3)
+            
+        except Exception as e:
+            st.warning(f"⚠️ Agent 2B: Could not connect to LLM. Error: {e}")
+            st.info("💡 Tip: Ensure your LLM server is running and accessible at the configured API base URL. "
+                   "Set the LLM_API_KEY and LLM_API_BASE environment variables or update them in the code.")
+            llm_result = None
+    
+    # Display LLM recommendations
+    if llm_result and "llm_response" in llm_result:
+        st.markdown("#### 🤖 LLM Expert Recommendation")
+        st.markdown(llm_result['llm_response'])
+        
+        with st.expander("ℹ️ About Agent 2B"):
+            config_info = llm_result.get('config', {})
+            st.markdown(f"""
+            **Agent 2B Configuration (from config.yaml):**
+            - **Model:** {config_info.get('model', 'N/A')}
+            - **API Base:** {config_info.get('api_base', 'N/A')}
+            - **Temperature:** {config_info.get('temperature', 0.1)}
+            - **Max Tokens:** {config_info.get('max_tokens', 200000):,}
+            - **Timeout:** {config_info.get('timeout', 1000.0)}s
+            - **Input:** Wind Speed ({llm_result['wind_speed']:.2f} m/s), Wind Direction ({llm_result['wind_direction']:.1f}°)
+            
+            **How it works:**
+            1. Agent 2B loads configuration from `config.yaml`
+            2. Queries a local LLM server using OpenAI-compatible API
+            3. The LLM is prompted with wind conditions and turbine specifications
+            4. The LLM generates expert recommendations based on its training
+            5. This provides an AI-powered second opinion alongside the rule-based Agent 2
+            
+            **Note:** The LLM's recommendations may differ from the rule-based expert (Agent 2). 
+            Both perspectives can be valuable for decision-making.
+            
+            **Configuration:** Edit `config.yaml` to update API key, model, and generation parameters.
+            """)
+    
+    # Arrow from Agent 2B to Agent 3
     st.markdown('''
     <div style="text-align: center; font-size: 2.5rem; color: #1E88E5; margin: 15px 0;">
     ⬇️
@@ -1835,7 +2077,6 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
     
     # Use the optimal nacelle direction from the optimizer (Agent 3)
     # Note: This is the ML model input (270°-285°), which is a proxy for yaw misalignment (0°-15°)
-    # The actual turbine yaw = wind_direction + yaw_misalignment
     optimal_yaw_ml = results.get("optimal_nacelle_upstream", expert['suggested_yaw'])
     actual_yaw_upstream = results.get("actual_yaw_upstream", weather.get('wind_direction_deg', 270))
     optimal_misalign_upstream = opt_results['optimal_upstream_misalignment'] if opt_results else 0
@@ -2093,7 +2334,7 @@ def display_summary_report(results):
 | **Wake Field Points** | {wake.get('shape', [0,0,0])[1] if wake else 'N/A':,} |
 | **Simulation Steps** | {wake.get('shape', [0,0,0])[0] if wake else 'N/A'} |
 
-*Note: Actual Yaw = Wind Direction + Yaw Misalignment (ML input 270°-285° is proxy for misalignment 0°-15°)*
+*Note: Actual Yaw = Wind Direction + Yaw Misalignment (ML model input 270°-285° is proxy for misalignment 0°-15°)*
 """
     
     st.markdown(report_md)
