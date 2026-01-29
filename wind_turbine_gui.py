@@ -1121,9 +1121,19 @@ def main():
     ''', unsafe_allow_html=True)
     
     # User input for yaw misalignment
-    demo_col1, demo_col2 = st.columns([1, 2])
-    
-    with demo_col1:
+    #demo_col1, demo_col2 = st.columns([1, 2])
+    with st.container():
+        st.markdown("""
+        **ML Models Developed by SINTEF Digital (mandar.tabib@sintef.no):**
+        
+        | Model | Description | Input | Output |
+        |-------|-------------|-------|--------|
+        | **TT-OpInf ROM** | Tensor Train Decomposition + Operator Inference | Yaw Direction (0°-15°) |  Wake Velocity Field |
+        | **GP Regressor** | Gaussian Process trained on CFD data | Yaw Direction (0°-15°)  | Rotor Power (MW) with uncertainty |
+       
+        *Models trained at SINTEF on high-fidelity CFD simulations of NREL 5MW turbine.*
+        """)
+    with st.container(): #demo_col1:
         user_yaw_misalignment = st.slider(
             "🎚️ Yaw Misalignment (degrees)",
             min_value=0.0,
@@ -1138,10 +1148,9 @@ def main():
         
         st.markdown(f"""
         **Current Settings:**
-        - Yaw Misalignment: **{user_yaw_misalignment:.0f}°**
-        - Nacelle Direction: **{user_nacelle_direction:.0f}°**
+        - Yaw Misalignment: **{user_yaw_misalignment:.0f}°**      
         """)
-        
+        #  - Nacelle Direction: **{user_nacelle_direction:.0f}°**
         # Expected power loss due to misalignment
         cos_loss = np.cos(np.radians(user_yaw_misalignment)) ** 3
         st.metric(
@@ -1152,18 +1161,8 @@ def main():
         
         run_demo = st.button("🔄 Run Model Prediction", type="secondary")
     
-    with demo_col2:
-        st.markdown("""
-        **ML Models Used:**
-        
-        | Model | Description | Input | Output |
-        |-------|-------------|-------|--------|
-        | **TT-OpInf ROM** | Tensor Decomposition + Operator Inference | Nacelle Direction (270°-285°) | 3D Wake Velocity Field |
-        | **GP Regressor** | Gaussian Process trained on CFD data | Nacelle Direction (270°-285°) | Rotor Power (MW) with uncertainty |
-        
-        *Models trained at SINTEF on high-fidelity CFD simulations of NREL 5MW turbine.*
-        """)
     
+    #Nacelle Direction (270°-285°) for ML models AS proxy for yaw direction.
     # Run demonstration when button is clicked or slider changes
     if run_demo or ('demo_results' not in st.session_state):
         with st.spinner("Running ML model predictions..."):
@@ -1310,8 +1309,8 @@ def main():
                         fps=8,
                         frame_skip=max(1, wake_predictions.shape[0] // 15),
                         cmap="RdYlBu_r",
-                        verbose=False,
-                        yaw_angle=st.session_state.get('demo_nacelle', 270)
+                        verbose=False
+                        #yaw_angle=st.session_state.get('demo_nacelle', 270)
                     )
                     
                     st.image(demo_anim_path, caption=f"Wake Flow | Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}° | Nacelle = {st.session_state.get('demo_nacelle', 270):.0f}°")
@@ -1337,9 +1336,19 @@ def main():
                         alpha=0.2, color='gray', label='5-95 percentile'
                     )
                     
+                    # Add turbine marker with rotation based on yaw misalignment
+                    yaw_misalignment = st.session_state.get('demo_yaw', 0)  # Get yaw misalignment
+                    turbine_marker = plt.Line2D([0], [0], color='black', linewidth=5, label='Turbine')
+                    ax.add_line(turbine_marker)
+
+                    # Apply rotation transformation
+                    from matplotlib.transforms import Affine2D
+                    rotation = Affine2D().rotate_deg(-yaw_misalignment)  # Rotate clockwise by yaw_misalignment
+                    turbine_marker.set_transform(rotation + ax.transData)
+
                     ax.set_xlabel('Timestep')
                     ax.set_ylabel('Velocity Magnitude (m/s)')
-                    ax.set_title(f'Wake Velocity Evolution | Yaw Misalignment = {st.session_state.get("demo_yaw", 0):.0f}°')
+                    ax.set_title(f'Wake Velocity Evolution | Yaw Misalignment = {yaw_misalignment:.0f}°')
                     ax.legend()
                     ax.grid(True, alpha=0.3)
                     plt.tight_layout()
@@ -1895,9 +1904,10 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
                         fps=8,
                         frame_skip=max(1, predictions.shape[0] // 20),
                         cmap="RdYlBu_r",
-                        verbose=False,
-                        yaw_angle=optimal_yaw_ml
+                        verbose=False
+                        #yaw_angle=optimal_yaw_ml
                     )
+                   
                     
                     st.image(anim_path, caption=f"Wake Flow (ML input: {optimal_yaw_ml:.0f}°, Actual Yaw: {actual_yaw_upstream:.0f}°)")
                     
