@@ -19,6 +19,7 @@ import torch
 from pathlib import Path
 from datetime import datetime
 import openai
+import requests
 
 #To do,
 #I get the error ⚠️ Agent 2B: Could not connect to LLM. Error: query_local_llm() got an unexpected keyword argument 'temperature' . I have added a new folder called LLM that could be useful with ntnu_llm.py and base.py , and it could be useful for connecting to the specfic Ntnu server where the local llm is. 
@@ -151,6 +152,24 @@ def load_agents():
 # =============================================================================
 # Weather Agent Functions
 # =============================================================================
+def rotate_line(line, angle, ax):
+    """
+    Rotates a Line2D object by a specified angle in degrees around its center.
+
+    Parameters:
+    - line: The Line2D object to rotate.
+    - angle: The rotation angle in degrees (float).
+    - ax: The Axes object where the line is plotted.
+    """
+    # Get the line's data points (x, y)
+    xdata, ydata = line.get_data()
+    
+    # Create a rotation transformation around the origin
+    transform = transforms.Affine2D().rotate_deg(angle) + ax.transData
+    
+    # Set the new transform for the line
+    line.set_transform(transform)
+    
 def fetch_weather(city: str, country: str):
     """Fetch weather data for a location."""
     import requests
@@ -260,6 +279,42 @@ def fetch_weather_for_farm(farm_name: str, farm_info: dict):
             "temperature_c": np.random.uniform(-5, 15),  # Norwegian temperatures
             "data_source": "Simulated Data",
             "farm_name": farm_name
+        }
+
+
+# =============================================================================
+# Agent 1A: Met.no (yr.no) Weather Fetch
+# =============================================================================
+def fetch_weather_yr_no(lat, lon):
+    """
+    Fetch wind speed and direction from Met.no Locationforecast API (yr.no).
+    Returns dict with wind_speed_ms and wind_direction_deg.
+    """
+    url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={lat}&lon={lon}"
+    headers = {
+        "User-Agent": "mandar.tabib@sintef.no"  # REQUIRED: Use your email or project name
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        timeseries = data["properties"]["timeseries"]
+        if not timeseries:
+            raise Exception("No timeseries data found")
+        latest = timeseries[0]["data"]["instant"]["details"]
+        wind_speed = latest.get("wind_speed", None)
+        wind_direction = latest.get("wind_from_direction", None)
+        return {
+            "wind_speed_ms": wind_speed,
+            "wind_direction_deg": wind_direction,
+            "data_source": "yr.no (Met.no Locationforecast API)"
+        }
+    except Exception as e:
+        print(f"Error fetching weather from yr.no: {e}")
+        return {
+            "wind_speed_ms": None,
+            "wind_direction_deg": None,
+            "data_source": "yr.no (Met.no Locationforecast API) - Error"
         }
 
 
@@ -1232,29 +1287,16 @@ def main():
         <li><b>Agent 1:</b> Weather Station - Fetches real-time wind conditions</li>
         <li><b>Agent 2:</b> Turbine Expert - Consults NREL 5MW manual for optimal yaw</li>
         <li><b>Agent 2B:</b> LLM-based Turbine Expert - Uses local LLM for intelligent recommendations</li>
-    </ul>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Justification paragraph between Agent 2B and Agent 3
-    st.markdown(
-        """
-        <div class="info-box">
-        <b>Why optimize for two turbines?</b><br>
-        Agent 3 (Two-Turbine Wake Steering Optimizer) is designed to maximize wind farm power by considering the aerodynamic interaction between pairs of turbines. In real wind farms, the wake from an upstream turbine can significantly reduce the power output of downstream turbines. By automatically selecting turbine pairs based on their spatial arrangement and prevailing wind direction, the optimizer can apply wake steering strategies (intentional yaw misalignment) to the upstream turbine, deflecting its wake and increasing the total power output of the pair. This approach is both computationally efficient and physically justified, as most wake losses occur between closely spaced turbine pairs. Optimizing at the pair level enables scalable, automated control for larger wind farms.
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    st.markdown("""
-    <div class="info-box">
-    <ul>
         <li><b>Agent 3:</b> Two-Turbine Wake Steering Optimizer - Finds optimal yaw misalignment for farm power maximization</li>
         <li><b>Agent 4:</b> Wind Turbine Wake Flow ROM - Tensor Decomposition + Operator Inference model</li>
         <li><b>Agent 5:</b> Wind Turbine Power Predictor - Gaussian Process Regressor trained at SINTEF</li>
     </ul>
-    <b> Select a wind farm on the left sidebar for agents to start analysis!</b>
+    </div>
+    """, unsafe_allow_html=True)
+   
+    st.markdown("""
+    <div class="info-box">          
+     <b> Select a wind farm on the left sidebar for agents to start analysis!</b>
     </div>
     """, unsafe_allow_html=True)
     
@@ -1275,6 +1317,8 @@ def main():
         # Show selected wind farm info in sidebar
         farm_info = NORWEGIAN_WIND_FARMS[selected_farm]
         st.markdown(f"**📍 Location:** {farm_info['location']}")
+        st.markdown(f"**🌐 Latitude:** {farm_info['latitude']}")
+        st.markdown(f"**🌐 Longitude:** {farm_info['longitude']}")
         st.markdown(f"**⚡ Capacity:** {farm_info['capacity_mw']} MW")
         st.markdown(f"**🌀 Turbines:** {farm_info['turbines']}")
         
@@ -1526,11 +1570,11 @@ def main():
                     yaw_misalignment = st.session_state.get('demo_yaw', 0)  # Get yaw misalignment
                     turbine_marker = plt.Line2D([0], [0], color='black', linewidth=5, label='Turbine')
                     ax.add_line(turbine_marker)
-
+                    rotate_line(turbine_marker, -yaw_misalignment, ax)
                     # Apply rotation transformation
-                    from matplotlib.transforms import Affine2D
-                    rotation = Affine2D().rotate_deg(-yaw_misalignment)  # Rotate clockwise by yaw_misalignment
-                    turbine_marker.set_transform(rotation + ax.transData)
+                    #from matplotlib.transforms import Affine2D
+                    #rotation = Affine2D().rotate_deg(-yaw_misalignment)  # Rotate clockwise by yaw_misalignment
+                    #turbine_marker.set_transform(rotation + ax.transData)
 
                     ax.set_xlabel('Timestep')
                     ax.set_ylabel('Velocity Magnitude (m/s)')
@@ -1591,6 +1635,10 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
         weather = fetch_weather_for_farm(selected_farm, farm_info)
         results["weather"] = weather
         progress_bar.progress(20)
+
+        # Agent 1A: Fetch weather from yr.no (Met.no)
+        yr_weather = fetch_weather_yr_no(farm_info["latitude"], farm_info["longitude"])
+        results["yr_weather"] = yr_weather
     
     # Display wind farm information with tabs
     tab1, tab2 = st.tabs(["🏭 Wind Farm Info", "🌍 Weather Data"])
@@ -1607,14 +1655,23 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
         st.info(f"ℹ️ {farm_info['description']}")
     
     with tab2:
-        wcol1, wcol2, wcol3 = st.columns(3)
+        wcol1, wcol2 = st.columns(2)
         with wcol1:
-            st.metric("🧭 Wind Direction", f"{weather['wind_direction_deg']:.0f}°")
+            st.markdown("#### Agent 1: Open-Meteo Weather Data")
+            st.write(results["weather"])
+            st.metric("🧭 Wind Direction", f"{results['weather']['wind_direction_deg']:.0f}°")
+            st.metric("💨 Wind Speed", f"{results['weather']['wind_speed_ms']:.1f} m/s")
+            st.metric("🌡️ Temperature", f"{results['weather']['temperature_c']:.1f}°C")
+            st.caption(f"Data source: {results['weather']['data_source']}")
         with wcol2:
-            st.metric("💨 Wind Speed", f"{weather['wind_speed_ms']:.1f} m/s")
-        with wcol3:
-            st.metric("🌡️ Temperature", f"{weather['temperature_c']:.1f}°C")
-        st.caption(f"Data source: {weather['data_source']}")
+            st.markdown("#### Agent 1A: yr.no (Met.no) Weather Data")
+            # Debug: Show raw API response for troubleshooting
+            st.code(str(results["yr_weather"]))
+            wind_dir = results['yr_weather'].get('wind_direction_deg', None)
+            wind_spd = results['yr_weather'].get('wind_speed_ms', None)
+            st.metric("🧭 Wind Direction", f"{wind_dir if wind_dir is not None else 'N/A'}°")
+            st.metric("💨 Wind Speed", f"{wind_spd if wind_spd is not None else 'N/A'} m/s")
+            st.caption(f"Data source: {results['yr_weather']['data_source']}")
     
     # Arrow from Agent 1 to Agent 2
     st.markdown('''
@@ -1759,7 +1816,9 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
     st.markdown("### 🎯 Agent 3: Two-Turbine Wake Steering Optimizer")
     st.markdown('''
     <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
-    Optimizes yaw misalignment for a two-turbine wind farm to maximize total power output.
+    Optimizes yaw misalignment for a two-turbine wind farm to maximize total power output. \n
+    Justification: This optimizer adjusts yaw misalignment angles to steer the wake laterally, reducing its impact on downstream turbines and increasing overall power output.
+    The turbine pairs to be provided to optimizer can be based on rules such as: 1. Distance Between Turbines, 2. Wind Turbine Hub Height, and 3. Wind Directio, 4. Farm layout
     </p>
     ''', unsafe_allow_html=True)
     
