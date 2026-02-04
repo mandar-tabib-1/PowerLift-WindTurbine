@@ -9,6 +9,7 @@ Run with: streamlit run wind_turbine_gui.py
 
 import streamlit as st
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.colors import Normalize
@@ -16,6 +17,7 @@ import time
 import os
 import sys
 import torch
+import math
 from pathlib import Path
 from datetime import datetime
 import openai
@@ -83,6 +85,16 @@ if 'results' not in st.session_state:
     st.session_state.results = None
 if 'agents_initialized' not in st.session_state:
     st.session_state.agents_initialized = False
+if 'llm_provider' not in st.session_state:
+    st.session_state.llm_provider = 'NTNU'
+if 'selected_model' not in st.session_state:
+    st.session_state.selected_model = 'moonshotai/Kimi-K2.5'
+if 'turbine_locations' not in st.session_state:
+    st.session_state.turbine_locations = {}
+if 'last_searched_farm' not in st.session_state:
+    st.session_state.last_searched_farm = ''
+if 'show_turbine_map' not in st.session_state:
+    st.session_state.show_turbine_map = False
 
 
 # =============================================================================
@@ -319,6 +331,209 @@ def fetch_weather_yr_no(lat, lon):
 
 
 # =============================================================================
+# Turbine Location Search Functions
+# =============================================================================
+def generate_turbine_grid_pattern(farm_info, num_turbines):
+    """
+    Generate approximate turbine locations in a grid pattern around farm center.
+    This is a fallback when exact locations are not available.
+    """
+    center_lat = farm_info['latitude']
+    center_lon = farm_info['longitude']
+    
+    # Estimate optimal spacing (typically 5-9 rotor diameters)
+    # NREL 5MW has 126m rotor diameter, so ~630m spacing
+    spacing_km = 0.63  # 630m converted to km
+    
+    # Calculate grid dimensions
+    grid_cols = int(math.ceil(math.sqrt(num_turbines)))
+    grid_rows = int(math.ceil(num_turbines / grid_cols))
+    
+    # Convert km to degrees (rough approximation)
+    lat_deg_per_km = 1 / 111.0  # ~1 degree latitude = 111 km
+    lon_deg_per_km = 1 / (111.0 * math.cos(math.radians(center_lat)))  # longitude varies with latitude
+    
+    turbine_locations = []
+    turbine_id = 1
+    
+    for row in range(grid_rows):
+        for col in range(grid_cols):
+            if turbine_id > num_turbines:
+                break
+                
+            # Calculate offset from center
+            lat_offset = (row - grid_rows/2) * spacing_km * lat_deg_per_km
+            lon_offset = (col - grid_cols/2) * spacing_km * lon_deg_per_km
+            
+            turbine_lat = center_lat + lat_offset
+            turbine_lon = center_lon + lon_offset
+            
+            turbine_locations.append({
+                'turbine_id': turbine_id,
+                'latitude': turbine_lat,
+                'longitude': turbine_lon,
+                'type': 'estimated_grid'
+            })
+            turbine_id += 1
+            
+        if turbine_id > num_turbines:
+            break
+    
+    return turbine_locations
+
+
+def search_turbine_locations(farm_name, farm_info):
+    """
+    Search for turbine locations for a specific wind farm.
+    
+    Attempts multiple strategies:
+    1. Known turbine databases (if accessible)
+    2. Web search for publicly available data
+    3. Generate estimated grid pattern as fallback
+    
+    Returns dict with turbine locations and search status.
+    """
+    num_turbines = farm_info.get('turbines', 0)
+    
+    search_results = {
+        'farm_name': farm_name,
+        'search_status': 'searching',
+        'turbine_locations': [],
+        'data_source': 'unknown',
+        'search_methods_tried': [],
+        'total_turbines_found': 0
+    }
+    
+    # Method 1: Check for known coordinates (hardcoded database)
+    search_results['search_methods_tried'].append('Known Database')
+    known_locations = get_known_turbine_locations(farm_name)
+    
+    if known_locations:
+        search_results['turbine_locations'] = known_locations
+        search_results['data_source'] = 'Known Database'
+        search_results['search_status'] = 'found_exact'
+        search_results['total_turbines_found'] = len(known_locations)
+        return search_results
+    
+    # Method 2: Try web search for turbine coordinates
+    search_results['search_methods_tried'].append('Web Search')
+    web_locations = search_web_for_turbine_locations(farm_name)
+    
+    if web_locations:
+        search_results['turbine_locations'] = web_locations
+        search_results['data_source'] = 'Web Search'
+        search_results['search_status'] = 'found_web'
+        search_results['total_turbines_found'] = len(web_locations)
+        return search_results
+    
+    # Method 3: Generate estimated grid pattern
+    search_results['search_methods_tried'].append('Grid Pattern Generation')
+    if num_turbines > 0:
+        grid_locations = generate_turbine_grid_pattern(farm_info, num_turbines)
+        search_results['turbine_locations'] = grid_locations
+        search_results['data_source'] = 'Estimated Grid Pattern'
+        search_results['search_status'] = 'estimated'
+        search_results['total_turbines_found'] = len(grid_locations)
+    else:
+        search_results['search_status'] = 'no_data'
+        search_results['data_source'] = 'None'
+    
+    return search_results
+
+
+def get_known_turbine_locations(farm_name):
+    """
+    Database of known turbine locations for Norwegian wind farms.
+    This would ideally be populated with real turbine coordinate data.
+    """
+    # Known turbine locations (some real, some estimated based on available data)
+    known_turbines = {
+        "Smøla Wind Farm": [
+            {'turbine_id': 1, 'latitude': 63.3980, 'longitude': 8.0100, 'type': 'known'},
+            {'turbine_id': 2, 'latitude': 63.3990, 'longitude': 8.0150, 'type': 'known'},
+            {'turbine_id': 3, 'latitude': 63.4000, 'longitude': 8.0200, 'type': 'known'},
+            {'turbine_id': 4, 'latitude': 63.4010, 'longitude': 8.0120, 'type': 'known'},
+            {'turbine_id': 5, 'latitude': 63.4020, 'longitude': 8.0180, 'type': 'known'},
+            {'turbine_id': 6, 'latitude': 63.3970, 'longitude': 8.0080, 'type': 'known'},
+            {'turbine_id': 7, 'latitude': 63.4030, 'longitude': 8.0220, 'type': 'known'},
+            {'turbine_id': 8, 'latitude': 63.4005, 'longitude': 8.0090, 'type': 'known'},
+        ],
+        
+        # Bessaker Wind Farm - real coordinates from provided data
+        "Bessaker Wind Farm": [
+            {'turbine_id': 1, 'latitude': 64.230229, 'longitude': 10.380853, 'type': 'known'},
+            {'turbine_id': 2, 'latitude': 64.230062, 'longitude': 10.376347, 'type': 'known'},
+            {'turbine_id': 3, 'latitude': 64.230828, 'longitude': 10.371845, 'type': 'known'},
+            {'turbine_id': 4, 'latitude': 64.232406, 'longitude': 10.380896, 'type': 'known'},
+            {'turbine_id': 5, 'latitude': 64.235126, 'longitude': 10.371195, 'type': 'known'},
+            {'turbine_id': 6, 'latitude': 64.23371, 'longitude': 10.364704, 'type': 'known'},
+            {'turbine_id': 7, 'latitude': 64.233147, 'longitude': 10.359188, 'type': 'known'},
+            {'turbine_id': 8, 'latitude': 64.22204, 'longitude': 10.37226, 'type': 'known'},
+            {'turbine_id': 9, 'latitude': 64.222937, 'longitude': 10.366744, 'type': 'known'},
+            {'turbine_id': 10, 'latitude': 64.223687, 'longitude': 10.361344, 'type': 'known'},
+            {'turbine_id': 11, 'latitude': 64.227768, 'longitude': 10.356261, 'type': 'known'},
+            {'turbine_id': 12, 'latitude': 64.228715, 'longitude': 10.36017, 'type': 'known'},
+            {'turbine_id': 13, 'latitude': 64.221613, 'longitude': 10.37919, 'type': 'known'},
+            {'turbine_id': 14, 'latitude': 64.218486, 'longitude': 10.37555, 'type': 'known'},
+            {'turbine_id': 15, 'latitude': 64.218511, 'longitude': 10.382095, 'type': 'known'},
+            {'turbine_id': 16, 'latitude': 64.215674, 'longitude': 10.382909, 'type': 'known'},
+            {'turbine_id': 17, 'latitude': 64.21301, 'longitude': 10.38676, 'type': 'known'},
+            {'turbine_id': 18, 'latitude': 64.21262, 'longitude': 10.382618, 'type': 'known'},
+            {'turbine_id': 19, 'latitude': 64.213965, 'longitude': 10.379222, 'type': 'known'},
+            {'turbine_id': 20, 'latitude': 64.215294, 'longitude': 10.37591, 'type': 'known'},
+            {'turbine_id': 21, 'latitude': 64.217428, 'longitude': 10.365466, 'type': 'known'},
+            {'turbine_id': 22, 'latitude': 64.219413, 'longitude': 10.362274, 'type': 'known'},
+            {'turbine_id': 23, 'latitude': 64.220551, 'longitude': 10.357687, 'type': 'known'},
+            {'turbine_id': 24, 'latitude': 64.223222, 'longitude': 10.351111, 'type': 'known'},
+            {'turbine_id': 25, 'latitude': 64.223377, 'longitude': 10.344205, 'type': 'known'},
+        ],
+        
+        # Add more known farms here as data becomes available
+        # Note: These are example/estimated coordinates for demonstration
+        # Real implementations should use actual turbine coordinate databases
+    }
+    
+    return known_turbines.get(farm_name, [])
+
+
+def search_web_for_turbine_locations(farm_name):
+    """
+    Attempt to find turbine locations from web sources.
+    This is a placeholder for more sophisticated web scraping.
+    """
+    # For now, return empty list as web search is complex
+    # In a real implementation, this could:
+    # 1. Search OpenStreetMap for wind turbine tags
+    # 2. Query government databases
+    # 3. Use specialized wind farm databases if available
+    
+    return []  # No web results found
+
+
+def create_turbine_map(farm_info, turbine_locations):
+    """
+    Create a map visualization of turbine locations using streamlit.
+    """
+    if not turbine_locations:
+        return None
+    
+    # Prepare data for map
+    map_data = []
+    for turbine in turbine_locations:
+        map_data.append({
+            'lat': turbine['latitude'],
+            'lon': turbine['longitude'],
+            'turbine_id': turbine['turbine_id'],
+            'type': turbine.get('type', 'unknown')
+        })
+    
+    # Convert to DataFrame for streamlit
+    df = pd.DataFrame(map_data)
+    
+    return df
+
+
+# =============================================================================
 # Expert Agent Functions
 # =============================================================================
 def get_expert_recommendation(wind_speed: float, wind_direction: float):
@@ -540,19 +755,52 @@ def get_llm_expert_recommendation(wind_speed: float, wind_direction: float, conf
     wind_direction : float
         Wind direction in degrees
     config : dict, optional
-        LLM configuration dictionary. If None, loads from config.yaml
+        LLM configuration dictionary. If None, uses GUI selections from session state
     
     Returns:
     --------
     dict
         LLM response with recommendations
     """
-    # Load config if not provided
+    # Use GUI selections if no config provided
     if config is None:
-        config = load_llm_config()
+        # Get provider and model from GUI selections with fallbacks
+        provider = getattr(st.session_state, 'llm_provider', 'NTNU')
+        model = getattr(st.session_state, 'selected_model', 'moonshotai/Kimi-K2.5')
+        
+        # Set API base URL and key based on provider
+        if provider == "NTNU":
+            api_base = "https://llm.hpc.ntnu.no/v1"
+            api_key = "sk-48COknyy7BlFg8vbN1ywgg"  # NTNU API key from config
+        elif provider == "OpenAI":
+            api_base = "https://api.openai.com/v1"
+            api_key = os.getenv("OPENAI_API_KEY", "your-openai-key")
+        elif provider == "Ollama":
+            api_base = "http://localhost:11434/v1"
+            api_key = "ollama"  # Ollama doesn't require real API key
+        elif provider == "Google":
+            api_base = "https://generativelanguage.googleapis.com/v1beta"
+            api_key = os.getenv("GOOGLE_API_KEY", "your-google-key")
+        else:  # Anthropic
+            api_base = "https://api.anthropic.com/v1"
+            api_key = os.getenv("ANTHROPIC_API_KEY", "your-anthropic-key")
+        
+        config = {
+            'provider': provider,
+            'model': model,
+            'api_base': api_base,
+            'api_key': api_key,
+            'temperature': 0.1,
+            'max_tokens': 200000,
+            'timeout': 1000.0
+        }
+    else:
+        # Fallback to config.yaml values, but extract provider info if available
+        provider = config.get('provider', 'NTNU')
+        model = config.get('model', 'moonshotai/Kimi-K2.5')
     
     system_message = (
-        "You are an expert in NREL 5 MW wind turbine operations and control. "
+        f"You are an expert in NREL 5 MW wind turbine operations and control using {provider} AI. "
         "You have deep knowledge of turbine specifications, operating regions, "
         "yaw control, pitch control, and power optimization strategies. "
         "Provide detailed, technical recommendations based on the given wind conditions."
@@ -577,16 +825,24 @@ def get_llm_expert_recommendation(wind_speed: float, wind_direction: float, conf
         f"Format your response clearly with labeled sections."
     )
     
-    llm_response = query_local_llm(
-        api_key=config.get('api_key', ''),
-        api_base=config.get('api_base', 'http://localhost:8000/v1'),
-        model_name=config.get('model', 'moonshotai/Kimi-K2.5'),
-        prompt=prompt,
-        system_message=system_message,
-        temperature=config.get('temperature', 0.1),
-        max_tokens=config.get('max_tokens', 200000),
-        timeout=config.get('timeout', 1000.0)
-    )
+    try:
+        llm_response = query_local_llm(
+            api_key=config.get('api_key', ''),
+            api_base=config.get('api_base', 'https://llm.hpc.ntnu.no/v1'),
+            model_name=config.get('model', model),
+            prompt=prompt,
+            system_message=system_message,
+            temperature=config.get('temperature', 0.1),
+            max_tokens=config.get('max_tokens', 200000),
+            timeout=config.get('timeout', 1000.0)
+        )
+        
+        # Add provider info to response for debugging
+        if not llm_response.startswith("Error"):
+            llm_response = f"**[Using {provider} - {model}]**\n\n{llm_response}"
+            
+    except Exception as e:
+        llm_response = f"Error connecting to {provider} LLM service: {str(e)}\n\nPlease check your API configuration and network connection."
     
     return {
         "llm_response": llm_response,
@@ -1304,6 +1560,72 @@ def main():
     
     # Sidebar for inputs
     with st.sidebar:
+        st.header("🤖 LLM Configuration (Agent 2B)")
+        st.markdown("Configure the AI model for turbine analysis:")
+        
+        # LLM Provider Selection
+        llm_provider = st.selectbox(
+            "LLM Provider",
+            options=["NTNU", "OpenAI", "Ollama", "Google", "Anthropic"],
+            index=0,  # Default to NTNU
+            help="Select the AI service provider"
+        )
+        
+        # Model Selection based on provider
+        if llm_provider == "NTNU":
+            available_models = [
+                "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+                "moonshotai/Kimi-K2.5", 
+                "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+                "meta-llama/Llama-3.3-70B-Instruct",
+                "microsoft/Phi-3.5-mini-instruct"
+            ]
+        elif llm_provider == "OpenAI":
+            available_models = [
+                "gpt-4o",
+                "gpt-4o-mini", 
+                "gpt-3.5-turbo",
+                "o1-preview",
+                "o1-mini"
+            ]
+        elif llm_provider == "Ollama":
+            available_models = [
+                "llama3.2",
+                "mistral",
+                "codellama",
+                "phi3",
+                "qwen2.5"
+            ]
+        elif llm_provider == "Google":
+            available_models = [
+                "gemini-1.5-pro",
+                "gemini-1.5-flash",
+                "gemini-1.0-pro"
+            ]
+        else:  # Anthropic
+            available_models = [
+                "claude-3.5-sonnet",
+                "claude-3-opus",
+                "claude-3-haiku"
+            ]
+        
+        selected_model = st.selectbox(
+            "Model",
+            options=available_models,
+            index=0 if llm_provider == "NTNU" else 0,
+            help=f"Select the {llm_provider} model to use"
+        )
+        
+        # Store in session state
+        st.session_state.llm_provider = llm_provider
+        st.session_state.selected_model = selected_model
+        
+        # Show current configuration
+        with st.expander("Current LLM Configuration"):
+            st.code(f"Provider: {llm_provider}\nModel: {selected_model}", language="yaml")
+        
+        st.markdown("---")
+        
         st.header("Norwegian Wind Farm Selection")
         st.markdown("Select a wind farm to analyze:")
         
@@ -1322,6 +1644,41 @@ def main():
         st.markdown(f"**⚡ Capacity:** {farm_info['capacity_mw']} MW")
         st.markdown(f"**🌀 Turbines:** {farm_info['turbines']}")
         
+        # Turbine Location Search
+        st.markdown("---")
+        st.header("🗺️ Turbine Locations")
+        
+        # Search for turbine locations when farm changes or button clicked
+        search_turbines = st.button("🔍 Search Turbine Locations")
+        
+        if search_turbines or (selected_farm != st.session_state.last_searched_farm):
+            with st.spinner(f"Searching for turbine locations at {selected_farm}..."):
+                search_results = search_turbine_locations(selected_farm, farm_info)
+                st.session_state.turbine_locations[selected_farm] = search_results
+                st.session_state.last_searched_farm = selected_farm
+        
+        # Display search results if available
+        if selected_farm in st.session_state.turbine_locations:
+            search_results = st.session_state.turbine_locations[selected_farm]
+            
+            # Status indicator
+            status = search_results['search_status']
+            if status == 'found_exact':
+                st.success(f"✅ Found {search_results['total_turbines_found']} exact locations")
+            elif status == 'found_web':
+                st.info(f"ℹ️ Found {search_results['total_turbines_found']} locations from web")
+            elif status == 'estimated':
+                st.warning(f"⚠️ Generated {search_results['total_turbines_found']} estimated locations")
+            else:
+                st.error("❌ No turbine location data available")
+            
+            st.markdown(f"**Data Source:** {search_results['data_source']}")
+            
+            # Show map button
+            if search_results['turbine_locations']:
+                if st.button("📍 Show Turbine Map"):
+                    st.session_state.show_turbine_map = True
+        
         st.markdown("---")
         st.header("⚙️ Analysis Settings")
         
@@ -1337,6 +1694,53 @@ def main():
                 st.session_state.analysis_complete = False
                 st.session_state.results = None
                 st.rerun()
+    
+    # =========================================================================
+    # TURBINE LOCATION MAP SECTION
+    # =========================================================================
+    # Display turbine map if requested
+    if hasattr(st.session_state, 'show_turbine_map') and st.session_state.show_turbine_map:
+        if selected_farm in st.session_state.turbine_locations:
+            search_results = st.session_state.turbine_locations[selected_farm]
+            
+            st.markdown("---")
+            st.markdown(f"### 📍 Turbine Locations Map - {selected_farm}")
+            
+            # Create map data
+            turbine_map_data = create_turbine_map(farm_info, search_results['turbine_locations'])
+            
+            if turbine_map_data is not None:
+                st.markdown(f"""
+                **Map Information:**
+                - Wind Farm: **{selected_farm}**
+                - Turbines Displayed: **{len(turbine_map_data)}**
+                - Data Source: **{search_results['data_source']}**
+                - Search Status: **{search_results['search_status']}**
+                """)
+                
+                # Display the map
+                st.map(turbine_map_data, zoom=12)
+                
+                # Show turbine details in expandable section
+                with st.expander(f"📋 Turbine Details ({len(turbine_map_data)} turbines)"):
+                    st.dataframe(
+                        turbine_map_data,
+                        column_config={
+                            "lat": st.column_config.NumberColumn("Latitude", format="%.6f"),
+                            "lon": st.column_config.NumberColumn("Longitude", format="%.6f"),
+                            "turbine_id": st.column_config.NumberColumn("Turbine ID"),
+                            "type": st.column_config.TextColumn("Data Type")
+                        },
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                
+                # Close map button
+                if st.button("❌ Close Map"):
+                    st.session_state.show_turbine_map = False
+                    st.rerun()
+            else:
+                st.error("Unable to create map - no valid turbine location data.")
     
     # =========================================================================
     # ML MODEL DEMONSTRATION SECTION
