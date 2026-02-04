@@ -536,6 +536,155 @@ def create_turbine_map(farm_info, turbine_locations):
 # =============================================================================
 # Expert Agent Functions
 # =============================================================================
+
+def get_turbine_pair_recommendations(turbine_locations, wind_speed, wind_dir, provider='NTNU', model='moonshotai/Kimi-K2.5'):
+    """
+    Agent 2C: LLM-based turbine pair selection for wake optimization.
+    
+    Analyzes turbine locations and wind conditions to identify critical turbine pairs
+    that are most affected by wake effects based on proximity and wind direction.
+    
+    Args:
+        turbine_locations: List of turbine location dicts with lat/lon/id
+        wind_speed: Wind speed in m/s
+        wind_dir: Wind direction in degrees
+        provider: LLM provider
+        model: LLM model name
+    
+    Returns:
+        dict: Analysis results with turbine pairs and recommendations
+    """
+    if not turbine_locations or len(turbine_locations) < 2:
+        return {
+            'agent': 'Agent 2C - Turbine Pair Selector',
+            'status': 'error',
+            'message': 'Insufficient turbine data for pair analysis',
+            'turbine_pairs': [],
+            'analysis': 'Need at least 2 turbines for wake analysis'
+        }
+    
+    try:
+        # Prepare turbine data for LLM analysis
+        turbine_summary = []
+        for i, turbine in enumerate(turbine_locations):
+            turbine_summary.append(f"Turbine {turbine['turbine_id']}: Lat {turbine['latitude']:.6f}, Lon {turbine['longitude']:.6f}")
+        
+        # Create detailed prompt for turbine pair analysis
+        prompt = f"""
+You are Agent 2C, an expert in wind farm wake analysis and turbine pair optimization. Analyze the provided wind farm layout to identify critical turbine pairs most affected by wake effects.
+
+WIND CONDITIONS:
+- Wind Speed: {wind_speed:.1f} m/s
+- Wind Direction: {wind_dir:.0f}° (meteorological convention: direction wind is coming FROM)
+- Wind is blowing FROM {wind_dir:.0f}° TO {(wind_dir + 180) % 360:.0f}°
+
+TURBINE LAYOUT:
+{chr(10).join(turbine_summary)}
+
+ANALYSIS REQUIREMENTS:
+1. Calculate relative positions of turbines based on wind direction
+2. Identify upstream-downstream turbine pairs along the wind direction vector
+3. Consider wake decay distance (typically 5-10 rotor diameters = 0.6-1.2 km for NREL 5MW)
+4. Prioritize pairs with strongest wake interactions
+5. Consider wake width expansion (±20° spread)
+
+RETURN FORMAT (JSON):
+{{
+  "critical_pairs": [
+    {{
+      "upstream_turbine": turbine_id,
+      "downstream_turbine": turbine_id,
+      "distance_km": distance,
+      "wake_strength": "high/medium/low",
+      "priority": ranking_number
+    }}
+  ],
+  "analysis_summary": "Brief explanation of wake patterns",
+  "optimization_strategy": "Recommended approach for yaw optimization"
+}}
+
+Provide analysis for the top 3-5 most critical turbine pairs."""
+        
+        # Get LLM configuration directly
+        if provider == "NTNU":
+            api_base = "https://llm.hpc.ntnu.no/v1"
+            api_key = "sk-48COknyy7BlFg8vbN1ywgg"  # NTNU API key from config
+        elif provider == "OpenAI":
+            api_base = "https://api.openai.com/v1"
+            api_key = os.getenv("OPENAI_API_KEY", "your-openai-key")
+        elif provider == "Ollama":
+            api_base = "http://localhost:11434/v1"
+            api_key = "ollama"  # Ollama doesn't require real API key
+        elif provider == "Google":
+            api_base = "https://generativelanguage.googleapis.com/v1beta"
+            api_key = os.getenv("GOOGLE_API_KEY", "your-google-key")
+        else:  # Anthropic
+            api_base = "https://api.anthropic.com/v1"
+            api_key = os.getenv("ANTHROPIC_API_KEY", "your-anthropic-key")
+        
+        config = {
+            'provider': provider,
+            'model': model,
+            'api_base': api_base,
+            'api_key': api_key,
+            'temperature': 0.1,
+            'max_tokens': 2000,
+            'timeout': 30.0
+        }
+        
+        # Query the LLM using the unified interface
+        response = query_local_llm(
+            api_key=config['api_key'],
+            api_base=config['api_base'],
+            model_name=config['model'],
+            prompt=prompt,
+            system_message="You are Agent 2C, an expert wind farm wake analysis system specializing in turbine pair optimization for maximum power output.",
+            temperature=config['temperature'],
+            max_tokens=config['max_tokens'],
+            timeout=config['timeout']
+        )
+        
+        # Parse JSON response
+        import json
+        try:
+            analysis_data = json.loads(response)
+            return {
+                'agent': 'Agent 2C - Turbine Pair Selector',
+                'status': 'success',
+                'provider': provider,
+                'model': model,
+                'turbine_pairs': analysis_data.get('critical_pairs', []),
+                'analysis_summary': analysis_data.get('analysis_summary', ''),
+                'optimization_strategy': analysis_data.get('optimization_strategy', ''),
+                'total_turbines': len(turbine_locations),
+                'wind_conditions': f"{wind_speed:.1f} m/s from {wind_dir:.0f}°",
+                'raw_response': response
+            }
+        except json.JSONDecodeError:
+            # Fallback: extract key information from text response
+            return {
+                'agent': 'Agent 2C - Turbine Pair Selector',
+                'status': 'partial',
+                'provider': provider,
+                'model': model,
+                'turbine_pairs': [],
+                'analysis_summary': response[:500] + "..." if len(response) > 500 else response,
+                'optimization_strategy': 'Manual parsing required',
+                'total_turbines': len(turbine_locations),
+                'wind_conditions': f"{wind_speed:.1f} m/s from {wind_dir:.0f}°",
+                'raw_response': response
+            }
+    
+    except Exception as e:
+        return {
+            'agent': 'Agent 2C - Turbine Pair Selector',
+            'status': 'error',
+            'message': f'Error in turbine pair analysis: {str(e)}',
+            'turbine_pairs': [],
+            'analysis': 'Analysis failed due to technical error'
+        }
+
+
 def get_expert_recommendation(wind_speed: float, wind_direction: float):
     """Get expert recommendation for yaw angle."""
     
@@ -1543,6 +1692,7 @@ def main():
         <li><b>Agent 1:</b> Weather Station - Fetches real-time wind conditions</li>
         <li><b>Agent 2:</b> Turbine Expert - Consults NREL 5MW manual for optimal yaw</li>
         <li><b>Agent 2B:</b> LLM-based Turbine Expert - Uses local LLM for intelligent recommendations</li>
+        <li><b>Agent 2C:</b> Turbine Pair Selector - Uses LLM to identify critical turbine pairs for wake optimization</li>
         <li><b>Agent 3:</b> Two-Turbine Wake Steering Optimizer - Finds optimal yaw misalignment for farm power maximization</li>
         <li><b>Agent 4:</b> Wind Turbine Wake Flow ROM - Tensor Decomposition + Operator Inference model</li>
         <li><b>Agent 5:</b> Wind Turbine Power Predictor - Gaussian Process Regressor trained at SINTEF</li>
@@ -2201,13 +2351,158 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
             **Configuration:** Edit `config.yaml` to update API key, model, and generation parameters.
             """)
     
-    # Arrow from Agent 2B to Agent 3
+    # =========================================================================
+    # AGENT 2C: Turbine Pair Selection for Multi-Turbine Wake Optimization
+    # =========================================================================
+    # Add Agent 2C analysis if turbine locations are available
+    if selected_farm in st.session_state.turbine_locations:
+        search_results = st.session_state.turbine_locations[selected_farm]
+        if search_results and search_results['turbine_locations']:
+            # Arrow from Agent 2B to Agent 2C
+            st.markdown('''
+            <div style="text-align: center; font-size: 2.5rem; color: #1E88E5; margin: 15px 0;">
+            ⬇️
+            </div>
+            <div style="text-align: center; font-size: 0.85rem; color: #666; margin-bottom: 15px;">
+            Wind & Turbine Data → Agent 2C (Turbine Pair Selector)
+            </div>
+            ''', unsafe_allow_html=True)
+            
+            st.markdown("### 🎯 Agent 2C: Turbine Pair Selector for Multi-Turbine Wind Farm")
+            st.markdown('''
+            <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
+            Analyzes turbine locations and wind conditions using LLM to identify critical turbine pairs 
+            most affected by wake effects. These pairs will be optimized by the downstream agents.
+            </p>
+            ''', unsafe_allow_html=True)
+            
+            progress_bar.progress(35)
+            status_text.text("🔄 Agent 2C: Analyzing turbine pairs for wake optimization...")
+            
+            with st.spinner("Agent 2C: Using LLM to identify critical turbine pairs..."):
+                try:
+                    # Get current LLM configuration from session state
+                    current_provider = st.session_state.get('llm_provider', 'NTNU')
+                    current_model = st.session_state.get('selected_model', 'moonshotai/Kimi-K2.5')
+                    
+                    turbine_pair_analysis = get_turbine_pair_recommendations(
+                        search_results['turbine_locations'],
+                        weather['wind_speed_ms'],
+                        weather['wind_direction_deg'],
+                        current_provider,
+                        current_model
+                    )
+                    results["turbine_pairs"] = turbine_pair_analysis
+                    progress_bar.progress(40)
+                    
+                    if turbine_pair_analysis['status'] == 'success':
+                        st.success(f"✅ {turbine_pair_analysis['agent']} analysis complete using {turbine_pair_analysis['provider']} - {turbine_pair_analysis['model']}")
+                        
+                        # Display analysis results
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total Turbines", turbine_pair_analysis['total_turbines'])
+                        with col2:
+                            st.metric("Critical Pairs", len(turbine_pair_analysis['turbine_pairs']))
+                        with col3:
+                            st.metric("Wind Conditions", turbine_pair_analysis['wind_conditions'])
+                        
+                        # Show analysis summary
+                        if turbine_pair_analysis.get('analysis_summary'):
+                            st.markdown(f"**Analysis:** {turbine_pair_analysis['analysis_summary']}")
+                        
+                        if turbine_pair_analysis.get('optimization_strategy'):
+                            st.markdown(f"**Strategy:** {turbine_pair_analysis['optimization_strategy']}")
+                        
+                        # Display critical turbine pairs
+                        if turbine_pair_analysis['turbine_pairs']:
+                            st.markdown("**Critical Turbine Pairs for Optimization:**")
+                            
+                            pair_cols = st.columns(min(3, len(turbine_pair_analysis['turbine_pairs'])))
+                            for i, pair in enumerate(turbine_pair_analysis['turbine_pairs']):
+                                col_idx = i % 3
+                                with pair_cols[col_idx]:
+                                    upstream = pair.get('upstream_turbine', 'N/A')
+                                    downstream = pair.get('downstream_turbine', 'N/A')
+                                    distance = pair.get('distance_km', 'N/A')
+                                    strength = pair.get('wake_strength', 'unknown')
+                                    priority = pair.get('priority', i+1)
+                                    
+                                    if strength == 'high':
+                                        emoji = "🔴"
+                                        color = "#ff4444"
+                                    elif strength == 'medium':
+                                        emoji = "🟡"
+                                        color = "#ffaa00"
+                                    else:
+                                        emoji = "🟢"
+                                        color = "#44aa44"
+                                    
+                                    distance_text = f"{distance:.2f}km" if isinstance(distance, (int, float)) else "N/A"
+                                    
+                                    st.markdown(f"""
+                                    <div style="border: 1px solid {color}; border-radius: 8px; padding: 10px; margin: 5px 0;">
+                                    <div style="font-weight: bold; color: {color};">
+                                    {emoji} Priority {priority}
+                                    </div>
+                                    <div style="font-size: 1.1em; margin: 5px 0;">
+                                    T{upstream} → T{downstream}
+                                    </div>
+                                    <div style="font-size: 0.9em; color: #666;">
+                                    Distance: {distance_text}<br>
+                                    Wake: {strength}
+                                    </div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                        else:
+                            st.info("No critical turbine pairs identified for current wind conditions")
+                        
+                        with st.expander("ℹ️ About Agent 2C"):
+                            st.markdown(f"""
+                            **Agent 2C Configuration:**
+                            - **LLM Provider:** {turbine_pair_analysis['provider']}
+                            - **LLM Model:** {turbine_pair_analysis['model']}
+                            - **Total Turbines Analyzed:** {turbine_pair_analysis['total_turbines']}
+                            - **Wind Conditions:** {turbine_pair_analysis['wind_conditions']}
+                            
+                            **How it works:**
+                            1. Agent 2C receives turbine locations from the location search
+                            2. It uses the same LLM configuration as Agent 2B
+                            3. The LLM analyzes wind direction, turbine spacing, and wake patterns
+                            4. It identifies the most critical upstream-downstream turbine pairs
+                            5. These pairs are prioritized for wake optimization by Agent 3
+                            
+                            **Purpose:** This agent bridges single-turbine analysis (Agent 2B) with 
+                            multi-turbine farm optimization by intelligently selecting which turbine 
+                            pairs will benefit most from wake steering control.
+                            """)
+                    
+                    elif turbine_pair_analysis['status'] == 'partial':
+                        st.warning(f"⚠️ {turbine_pair_analysis['agent']} analysis partially complete")
+                        st.markdown(f"**Analysis:** {turbine_pair_analysis.get('analysis_summary', 'Partial results available')}")
+                        results["turbine_pairs"] = turbine_pair_analysis
+                    
+                    else:
+                        st.error(f"❌ {turbine_pair_analysis['agent']} analysis failed: {turbine_pair_analysis.get('message', 'Unknown error')}")
+                        results["turbine_pairs"] = None
+                        
+                except Exception as e:
+                    st.error(f"❌ Agent 2C: Error in turbine pair analysis: {str(e)}")
+                    results["turbine_pairs"] = None
+        else:
+            st.info("🎯 Agent 2C: Turbine pair analysis requires turbine location data. Agent 2C will be skipped.")
+            results["turbine_pairs"] = None
+    else:
+        st.info("🎯 Agent 2C: No turbine location data available. Use 'Search Turbine Locations' in the sidebar to enable multi-turbine analysis.")
+        results["turbine_pairs"] = None
+
+    # Arrow from Agent 2B/2C to Agent 3
     st.markdown('''
     <div style="text-align: center; font-size: 2.5rem; color: #1E88E5; margin: 15px 0;">
     ⬇️
     </div>
     <div style="text-align: center; font-size: 0.85rem; color: #666; margin-bottom: 15px;">
-    Wind Conditions → Agent 3 (Two-Turbine Optimizer)
+    Wind Conditions & Turbine Pairs → Agent 3 (Two-Turbine Optimizer)
     </div>
     ''', unsafe_allow_html=True)
     
@@ -2220,9 +2515,9 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
     st.markdown("### 🎯 Agent 3: Two-Turbine Wake Steering Optimizer")
     st.markdown('''
     <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
-    Optimizes yaw misalignment for a two-turbine wind farm to maximize total power output. \n
+    Optimizes yaw misalignment for turbine pairs identified by Agent 2C to maximize total power output. \n
     Justification: This optimizer adjusts yaw misalignment angles to steer the wake laterally, reducing its impact on downstream turbines and increasing overall power output.
-    The turbine pairs to be provided to optimizer can be based on rules such as: 1. Distance Between Turbines, 2. Wind Turbine Hub Height, and 3. Wind Directio, 4. Farm layout
+    The turbine pairs are provided by Agent 2C based on LLM analysis of: 1. Distance Between Turbines, 2. Wind Direction, 3. Wake Interaction Strength, and 4. Farm Layout
     </p>
     ''', unsafe_allow_html=True)
     
@@ -2859,6 +3154,35 @@ Total Farm Power:
         else:
             optimizer_section = ""
         
+        # Generate turbine pair analysis section
+        turbine_pairs = results.get('turbine_pairs', {})
+        if turbine_pairs and turbine_pairs.get('status') == 'success':
+            pairs_text = []
+            for pair in turbine_pairs.get('turbine_pairs', []):
+                upstream = pair.get('upstream_turbine', 'N/A')
+                downstream = pair.get('downstream_turbine', 'N/A')
+                strength = pair.get('wake_strength', 'unknown')
+                distance = pair.get('distance_km', 'N/A')
+                if isinstance(distance, (int, float)):
+                    pairs_text.append(f"  T{upstream} → T{downstream}: {distance:.2f}km ({strength} wake)")
+                else:
+                    pairs_text.append(f"  T{upstream} → T{downstream}: {strength} wake")
+            
+            turbine_pair_section = f"""
+Total Turbines: {turbine_pairs.get('total_turbines', 'N/A')}
+Critical Pairs Identified: {len(turbine_pairs.get('turbine_pairs', []))}
+Wind Conditions: {turbine_pairs.get('wind_conditions', 'N/A')}
+Analysis: {turbine_pairs.get('analysis_summary', 'N/A')}
+Optimization Strategy: {turbine_pairs.get('optimization_strategy', 'N/A')}
+
+Critical Turbine Pairs:
+{chr(10).join(pairs_text) if pairs_text else '  No critical pairs identified'}
+"""
+        else:
+            turbine_pair_section = """
+Turbine pair analysis not available or failed.
+"""
+        
         report_text = f"""
 WIND TURBINE MULTI-AGENT ANALYSIS REPORT
 ========================================
@@ -2879,6 +3203,9 @@ Operating Region: {expert.get('operating_region', 'N/A')}
 Real-World Yaw (aligned): {expert.get('actual_yaw', 0):.1f}°
 Expected Efficiency: {expert.get('expected_efficiency', 0)*100:.1f}%
 {optimizer_section}
+TURBINE PAIR ANALYSIS (Agent 2C)
+--------------------------------
+{turbine_pair_section}
 POWER PREDICTION (SINTEF ML Model)
 ----------------------------------
 Mean Power Output: {power.get('mean_MW', 0):.3f} MW
