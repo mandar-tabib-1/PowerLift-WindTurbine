@@ -2552,6 +2552,35 @@ def main():
         st.markdown("---")
         st.header("⚙️ Analysis Settings")
         
+        # Agent Selection: Optional Agents
+        st.markdown("**Optional Analysis Agents:**")
+        col1, col2 = st.columns(2)
+        with col1:
+            enable_agent_2b = st.checkbox(
+                "🤖 Agent 2B (LLM Expert)",
+                value=True,
+                help="Enable LLM-based turbine control recommendations"
+            )
+        with col2:
+            enable_agent_4 = st.checkbox(
+                "🌊 Agent 4 (Wake Flow ROM)",
+                value=True,
+                help="Enable wake flow simulation using ROM"
+            )
+        
+        enable_agent_5 = st.checkbox(
+            "⚡ Agent 5 (Power Predictor)",
+            value=True,
+            help="Enable power prediction using GP model"
+        )
+        
+        # Store in session state
+        st.session_state.enable_agent_2b = enable_agent_2b
+        st.session_state.enable_agent_4 = enable_agent_4
+        st.session_state.enable_agent_5 = enable_agent_5
+        
+        st.markdown("---")
+        
         # Agent 2C/2D Selection
         st.markdown("**Turbine Pair Selection Agent:**")
         agent_selection = st.radio(
@@ -3268,74 +3297,80 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
     time.sleep(0.9)
     
     # =========================================================================
-    # AGENT 2B: LLM-based Turbine Expert
+    # AGENT 2B: LLM-based Turbine Expert (OPTIONAL)
     # =========================================================================
-    st.markdown("### 🤖 Agent 2B: LLM-based Turbine Expert")
-    st.markdown('''
-    <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
-    Uses local LLM (moonshotai/Kimi-K2.5) to provide intelligent turbine control recommendations.
-    </p>
-    ''', unsafe_allow_html=True)
+    enable_agent_2b = st.session_state.get('enable_agent_2b', True)
     
-    # LLM Configuration - Use GUI selections from session state
-    # Don't load from config.yaml - use the selections from the sidebar
-    llm_config = None  # This will trigger get_llm_expert_recommendation to use session state
-    
-    # Show current LLM configuration being used
-    current_provider = st.session_state.get('llm_provider', 'NTNU')
-    current_model = st.session_state.get('selected_model', 'moonshotai/Kimi-K2.5')
-    st.info(f"🤖 Using LLM: **{current_provider}** - **{current_model}**")
-    
-    status_text.text("🔄 Agent 2B: Loading LLM configuration and querying for expert recommendations...")
-    time.sleep(0.5)
-    
-    with st.spinner("Agent 2B: Consulting LLM for turbine control recommendations..."):
-        try:
-            llm_result = get_llm_expert_recommendation(
-                wind_speed=weather['wind_speed_ms'],
-                wind_direction=weather['wind_direction_deg'],
-                config=llm_config  # Pass None to use session state configuration
-            )
-            
-            results['llm_expert'] = llm_result
-            progress_bar.progress(0.4)
-            time.sleep(0.3)
-            
-        except Exception as e:
-            st.warning(f"⚠️ Agent 2B: Could not connect to LLM. Error: {e}")
-            st.info("💡 Tip: Ensure your LLM server is running and accessible at the configured API base URL. "
-                   "Set the LLM_API_KEY and LLM_API_BASE environment variables or update them in the code.")
-            llm_result = None
-    
-    # Display LLM recommendations
-    if llm_result and "llm_response" in llm_result:
-        st.markdown("#### 🤖 LLM Expert Recommendation")
-        st.markdown(llm_result['llm_response'])
+    if enable_agent_2b:
+        st.markdown("### 🤖 Agent 2B: LLM-based Turbine Expert")
+        st.markdown('''
+        <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
+        Uses local LLM (moonshotai/Kimi-K2.5) to provide intelligent turbine control recommendations.
+        </p>
+        ''', unsafe_allow_html=True)
         
-        with st.expander("ℹ️ About Agent 2B"):
-            config_info = llm_result.get('config', {})
-            st.markdown(f"""
-            **Agent 2B Configuration (from GUI selections):**
-            - **Provider:** {config_info.get('provider', 'N/A')}
-            - **Model:** {config_info.get('model', 'N/A')}
-            - **API Base:** {config_info.get('api_base', 'N/A')}
-            - **Temperature:** {config_info.get('temperature', 0.1)}
-            - **Max Tokens:** {config_info.get('max_tokens', 200000):,}
-            - **Timeout:** {config_info.get('timeout', 1000.0)}s
-            - **Input:** Wind Speed ({llm_result['wind_speed']:.2f} m/s), Wind Direction ({llm_result['wind_direction']:.1f}°)
+        # LLM Configuration - Use GUI selections from session state
+        # Don't load from config.yaml - use the selections from the sidebar
+        llm_config = None  # This will trigger get_llm_expert_recommendation to use session state
+        
+        # Show current LLM configuration being used
+        current_provider = st.session_state.get('llm_provider', 'NTNU')
+        current_model = st.session_state.get('selected_model', 'moonshotai/Kimi-K2.5')
+        st.info(f"🤖 Using LLM: **{current_provider}** - **{current_model}**")
+        
+        status_text.text("🔄 Agent 2B: Loading LLM configuration and querying for expert recommendations...")
+        time.sleep(0.5)
+        
+        with st.spinner("Agent 2B: Consulting LLM for turbine control recommendations..."):
+            try:
+                llm_result = get_llm_expert_recommendation(
+                    wind_speed=weather['wind_speed_ms'],
+                    wind_direction=weather['wind_direction_deg'],
+                    config=llm_config  # Pass None to use session state configuration
+                )
+                
+                results['llm_expert'] = llm_result
+                progress_bar.progress(0.4)
+                time.sleep(0.3)
+                
+            except Exception as e:
+                st.warning(f"⚠️ Agent 2B: Could not connect to LLM. Error: {e}")
+                st.info("💡 Tip: Ensure your LLM server is running and accessible at the configured API base URL. "
+                       "Set the LLM_API_KEY and LLM_API_BASE environment variables or update them in the code.")
+                llm_result = None
+        
+        # Display LLM recommendations
+        if llm_result and "llm_response" in llm_result:
+            st.markdown("#### 🤖 LLM Expert Recommendation")
+            st.markdown(llm_result['llm_response'])
             
-            **How it works:**
-            1. Agent 2B uses the LLM provider and model selected in the GUI sidebar
-            2. Queries the LLM server using OpenAI-compatible API
-            3. The LLM is prompted with wind conditions and turbine specifications
-            4. The LLM generates expert recommendations based on its training
-            5. This provides an AI-powered second opinion alongside the rule-based Agent 2
-            
-            **Note:** The LLM's recommendations may differ from the rule-based expert (Agent 2). 
-            Both perspectives can be valuable for decision-making.
-            
-            **Configuration:** Change the provider and model in the sidebar to use different AI services.
-            """)
+            with st.expander("ℹ️ About Agent 2B"):
+                config_info = llm_result.get('config', {})
+                st.markdown(f"""
+                **Agent 2B Configuration (from GUI selections):**
+                - **Provider:** {config_info.get('provider', 'N/A')}
+                - **Model:** {config_info.get('model', 'N/A')}
+                - **API Base:** {config_info.get('api_base', 'N/A')}
+                - **Temperature:** {config_info.get('temperature', 0.1)}
+                - **Max Tokens:** {config_info.get('max_tokens', 200000):,}
+                - **Timeout:** {config_info.get('timeout', 1000.0)}s
+                - **Input:** Wind Speed ({llm_result['wind_speed']:.2f} m/s), Wind Direction ({llm_result['wind_direction']:.1f}°)
+                
+                **How it works:**
+                1. Agent 2B uses the LLM provider and model selected in the GUI sidebar
+                2. Queries the LLM server using OpenAI-compatible API
+                3. The LLM is prompted with wind conditions and turbine specifications
+                4. The LLM generates expert recommendations based on its training
+                5. This provides an AI-powered second opinion alongside the rule-based Agent 2
+                
+                **Note:** The LLM's recommendations may differ from the rule-based expert (Agent 2). 
+                Both perspectives can be valuable for decision-making.
+                
+                **Configuration:** Change the provider and model in the sidebar to use different AI services.
+                """)
+    else:
+        st.info("⏭️ Agent 2B (LLM Expert) is disabled. Enable it in Analysis Settings to run.")
+        results['llm_expert'] = None
     
     # =========================================================================
     # AGENT 2C: Turbine Pair Selection for Multi-Turbine Wake Optimization
@@ -4212,111 +4247,117 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
     time.sleep(0.8)
     
     # =========================================================================
-    # AGENT 4: Wind Turbine Wake Flow at Recommended Yaw Angle: A Reduced Order Model.
+    # AGENT 4: Wind Turbine Wake Flow at Recommended Yaw Angle: A Reduced Order Model (OPTIONAL)
     # =========================================================================
-    st.markdown("### 🌊 Agent 4: Wind Turbine Wake Flow: A Reduced Order Model")
-    st.markdown('''
-    <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
-    <b>Parametric Reduced Order Model</b> based on hi-fidelity CFD data.
-    based on <b>Tensor Decomposition + Radial Basis Function + Operator Inference</b>.
-    Contact: mandar.tabib@sintef.no for details.
-</p>
-    ''', unsafe_allow_html=True)
+    enable_agent_4 = st.session_state.get('enable_agent_4', True)
     
-    # Use the optimal nacelle direction from the optimizer (Agent 3)
-    # Note: This is the ML model input (270°-285°), which is a proxy for yaw misalignment (0°-15°)
-    optimal_yaw_ml = results.get("optimal_nacelle_upstream", expert['suggested_yaw'])
-    actual_yaw_upstream = results.get("actual_yaw_upstream", weather.get('wind_direction_deg', 270))
-    optimal_misalign_upstream = results.get("optimal_upstream_misalignment", 0)
-    
-    st.markdown(f"""**Running wake simulation:**
-- ML Model Input (Nacelle Dir): **{optimal_yaw_ml:.1f}°** (proxy for {optimal_misalign_upstream:.0f}° misalignment)
-- Actual Turbine Yaw: **{actual_yaw_upstream:.0f}°** (= {weather.get('wind_direction_deg', 270):.0f}° wind dir + {optimal_misalign_upstream:.0f}° misalign)
-""")
-    
-    status_text.text("🔄 Agent 4: Initializing TD-RBF-OpInf model...")
-    time.sleep(0.5)
-    with st.spinner("Running ROM: A TD-RBF-OpInf wake flow simulator..."):
-        status_text.text("Agent 4: Computing velocity field using TD-RBF-OpInf...")
-        progress_bar.progress(60)
+    if enable_agent_4:
+        st.markdown("### 🌊 Agent 4: Wind Turbine Wake Flow: A Reduced Order Model")
+        st.markdown('''
+        <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
+        <b>Parametric Reduced Order Model</b> based on hi-fidelity CFD data.
+        based on <b>Tensor Decomposition + Radial Basis Function + Operator Inference</b>.
+        Contact: mandar.tabib@sintef.no for details.
+    </p>
+        ''', unsafe_allow_html=True)
         
-        try:
-            power_agent, wake_agent = load_agents()
+        # Use the optimal nacelle direction from the optimizer (Agent 3)
+        # Note: This is the ML model input (270°-285°), which is a proxy for yaw misalignment (0°-15°)
+        optimal_yaw_ml = results.get("optimal_nacelle_upstream", expert['suggested_yaw'])
+        actual_yaw_upstream = results.get("actual_yaw_upstream", weather.get('wind_direction_deg', 270))
+        optimal_misalign_upstream = results.get("optimal_upstream_misalignment", 0)
+        
+        st.markdown(f"""**Running wake simulation:**
+    - ML Model Input (Nacelle Dir): **{optimal_yaw_ml:.1f}°** (proxy for {optimal_misalign_upstream:.0f}° misalignment)
+    - Actual Turbine Yaw: **{actual_yaw_upstream:.0f}°** (= {weather.get('wind_direction_deg', 270):.0f}° wind dir + {optimal_misalign_upstream:.0f}° misalign)
+    """)
+        
+        status_text.text("🔄 Agent 4: Initializing TD-RBF-OpInf model...")
+        time.sleep(0.5)
+        with st.spinner("Running ROM: A TD-RBF-OpInf wake flow simulator..."):
+            status_text.text("Agent 4: Computing velocity field using TD-RBF-OpInf...")
+            progress_bar.progress(60)
             
-            predictions, vtk_dir = wake_agent.predict(
-                yaw_angle=optimal_yaw_ml,
-                n_timesteps=n_timesteps,
-                export_vtk=export_vtk,
-                export_every=5,
-                verbose=False
-            )
-            
-            velocity_mag = np.linalg.norm(predictions, axis=2)
-            
-            results["wake"] = {
-                "predictions": predictions,
-                "velocity_mag": velocity_mag,
-                "vtk_dir": vtk_dir,
-                "shape": predictions.shape
-            }
-            
-            progress_bar.progress(65)
-            
-            st.success(f"✅ Wake simulation complete!")
-            
-            wcol1, wcol2 = st.columns(2)
-            with wcol1:
-                st.metric("Spatial Points", f"{predictions.shape[1]:,}")
-            with wcol2:
-                st.metric("Timesteps", predictions.shape[0])
-            
-            if vtk_dir:
-                st.info(f"📁 VTK files saved to: `{vtk_dir}`")
-            
-            # Generate wake flow animation
-            progress_bar.progress(70)
-            st.markdown("#### 🎬 Wake Flow Animation")
-            
-            with st.spinner("Generating wake flow animation..."):
-                status_text.text("Creating ParaView-style visualization...")
+            try:
+                power_agent, wake_agent = load_agents()
                 
-                try:
-                    from wake_animation import create_wake_contour_animation
+                predictions, vtk_dir = wake_agent.predict(
+                    yaw_angle=optimal_yaw_ml,
+                    n_timesteps=n_timesteps,
+                    export_vtk=export_vtk,
+                    export_every=5,
+                    verbose=False
+                )
+                
+                velocity_mag = np.linalg.norm(predictions, axis=2)
+                
+                results["wake"] = {
+                    "predictions": predictions,
+                    "velocity_mag": velocity_mag,
+                    "vtk_dir": vtk_dir,
+                    "shape": predictions.shape
+                }
+                
+                progress_bar.progress(65)
+                
+                st.success(f"✅ Wake simulation complete!")
+                
+                wcol1, wcol2 = st.columns(2)
+                with wcol1:
+                    st.metric("Spatial Points", f"{predictions.shape[1]:,}")
+                with wcol2:
+                    st.metric("Timesteps", predictions.shape[0])
+                
+                if vtk_dir:
+                    st.info(f"📁 VTK files saved to: `{vtk_dir}`")
+                
+                # Generate wake flow animation
+                progress_bar.progress(70)
+                st.markdown("#### 🎬 Wake Flow Animation")
+                
+                with st.spinner("Generating wake flow animation..."):
+                    status_text.text("Creating ParaView-style visualization...")
                     
-                    anim_path = os.path.join(SCRIPT_DIR, "wake_animation_optimal.gif")
-                    grid_path = str(PROJECT_ROOT / "ResultMLYaw" / "Grid_data.vtk")
-                    
-                    create_wake_contour_animation(
-                        predictions=predictions,
-                        grid_path=grid_path,
-                        output_path=anim_path,
-                        fps=8,
-                        frame_skip=max(1, predictions.shape[0] // 20),
-                        cmap="RdYlBu_r",
-                        verbose=False,
-                        yaw_misalignment=optimal_misalign_upstream
-                    )
-                   
-                    
-                    st.image(anim_path, caption=f"Wake Flow (ML input: {optimal_yaw_ml:.0f}°, Actual Yaw: {actual_yaw_upstream:.0f}°)")
-                    
-                    with open(anim_path, "rb") as f:
-                        st.download_button(
-                            label="📥 Download Animation",
-                            data=f,
-                            file_name=f"wake_animation_misalign_{optimal_misalign_upstream:.0f}deg.gif",
-                            mime="image/gif",
-                            key="download_wake_optimal"
-                        )
+                    try:
+                        from wake_animation import create_wake_contour_animation
                         
-                except Exception as anim_e:
-                    st.warning(f"Could not create animation: {anim_e}")
-            
-        except Exception as e:
-            st.error(f"Wake simulation failed: {e}")
-            import traceback
-            st.code(traceback.format_exc())
-            results["wake"] = None
+                        anim_path = os.path.join(SCRIPT_DIR, "wake_animation_optimal.gif")
+                        grid_path = str(PROJECT_ROOT / "ResultMLYaw" / "Grid_data.vtk")
+                        
+                        create_wake_contour_animation(
+                            predictions=predictions,
+                            grid_path=grid_path,
+                            output_path=anim_path,
+                            fps=8,
+                            frame_skip=max(1, predictions.shape[0] // 20),
+                            cmap="RdYlBu_r",
+                            verbose=False,
+                            yaw_misalignment=optimal_misalign_upstream
+                        )
+                       
+                        
+                        st.image(anim_path, caption=f"Wake Flow (ML input: {optimal_yaw_ml:.0f}°, Actual Yaw: {actual_yaw_upstream:.0f}°)")
+                        
+                        with open(anim_path, "rb") as f:
+                            st.download_button(
+                                label="📥 Download Animation",
+                                data=f,
+                                file_name=f"wake_animation_misalign_{optimal_misalign_upstream:.0f}deg.gif",
+                                mime="image/gif",
+                                key="download_wake_optimal"
+                            )
+                            
+                    except Exception as anim_e:
+                        st.warning(f"Could not create animation: {anim_e}")
+                    
+            except Exception as e:
+                st.error(f"Wake simulation failed: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+                results["wake"] = None
+    else:
+        st.info("⏭️ Agent 4 (Wake Flow ROM) is disabled. Enable it in Analysis Settings to run.")
+        results["wake"] = None
     
     # Arrow from Agent 4 to Agent 5
     st.markdown('''
@@ -4331,129 +4372,135 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
     time.sleep(0.9)
     
     # =========================================================================
-    # AGENT 5: Power Predictor
+    # AGENT 5: Power Predictor (OPTIONAL)
     # =========================================================================
-    st.markdown("### ⚡ Agent 5: Power Predictor")
-    st.markdown('''
-    <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
-    Gaussian Process Regression trained on high-fidelity CFD simulation data.
-    </p>
-    ''', unsafe_allow_html=True)
+    enable_agent_5 = st.session_state.get('enable_agent_5', True)
     
-    # Use the optimal nacelle direction from the optimizer (Agent 3)
-    # Note: This is the ML model input (270°-285°), which is a proxy for yaw misalignment (0°-15°)
-    optimal_yaw_power_ml = results.get("optimal_nacelle_upstream", expert['suggested_yaw'])
-    
-    st.markdown(f"""**Running power prediction:**
-- ML Model Input (Nacelle Dir): **{optimal_yaw_power_ml:.1f}°** (proxy for {optimal_misalign_upstream:.0f}° misalignment)
-- Actual Turbine Yaw: **{actual_yaw_upstream:.0f}°** (= {weather.get('wind_direction_deg', 270):.0f}° wind dir + {optimal_misalign_upstream:.0f}° misalign)
-""")
-    
-    status_text.text("🔄 Agent 5: Loading SINTEF ML models...")
-    time.sleep(0.5)
-    with st.spinner("Running Gaussian Process power prediction..."):
-        status_text.text("Agent 5: Computing power output with uncertainty quantification...")
-        progress_bar.progress(80)
+    if enable_agent_5:
+        st.markdown("### ⚡ Agent 5: Power Predictor")
+        st.markdown('''
+        <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
+        Gaussian Process Regression trained on high-fidelity CFD simulation data.
+        </p>
+        ''', unsafe_allow_html=True)
         
-        try:
-            power_agent, wake_agent = load_agents()
+        # Use the optimal nacelle direction from the optimizer (Agent 3)
+        # Note: This is the ML model input (270°-285°), which is a proxy for yaw misalignment (0°-15°)
+        optimal_yaw_power_ml = results.get("optimal_nacelle_upstream", expert['suggested_yaw'])
+        
+        st.markdown(f"""**Running power prediction:**
+    - ML Model Input (Nacelle Dir): **{optimal_yaw_power_ml:.1f}°** (proxy for {optimal_misalign_upstream:.0f}° misalignment)
+    - Actual Turbine Yaw: **{actual_yaw_upstream:.0f}°** (= {weather.get('wind_direction_deg', 270):.0f}° wind dir + {optimal_misalign_upstream:.0f}° misalign)
+    """)
+        
+        status_text.text("🔄 Agent 5: Loading SINTEF ML models...")
+        time.sleep(0.5)
+        with st.spinner("Running Gaussian Process power prediction..."):
+            status_text.text("Agent 5: Computing power output with uncertainty quantification...")
+            progress_bar.progress(80)
             
-            power_results = power_agent.predict(
-                yaw_angle=optimal_yaw_power_ml,
-                n_time_points=n_timesteps,
-                return_samples=True,
-                n_samples=50
-            )
-            
-            # Use time range 0.1 to 0.9 for all computations
-            t = power_results['normalized_time']
-            valid_idx = (t >= 0.1) & (t <= 0.9)
-            
-            # Calculate statistics from power_mean_MW vector (analytical GP mean)
-            mean_power = np.mean(power_results['power_mean_MW'][valid_idx])
-            min_power = np.min(power_results['power_mean_MW'][valid_idx])
-            max_power = np.max(power_results['power_mean_MW'][valid_idx])
-            power_variation = max_power - min_power
-            uncertainty = np.mean(power_results['power_std_MW'][valid_idx])
-            
-            results["power"] = {
-                "mean_MW": mean_power,
-                "min_MW": min_power,
-                "max_MW": max_power,
-                "variation_MW": power_variation,
-                "uncertainty_MW": uncertainty,
-                "time_series": power_results
-            }
-            
-            progress_bar.progress(85)
-            
-            st.success(f"✅ Power prediction complete!")
-            
-            # Display power metrics from analytical GP mean (t=0.1-0.9)
-            st.markdown("**📈 Power Statistics from Analytical GP Mean (t=0.1-0.9):**")
-            pcol1, pcol2, pcol3, pcol4 = st.columns(4)
-            with pcol1:
-                st.metric("Time-Averaged", f"{mean_power:.3f} MW", help="np.mean(power_mean_MW)")
-            with pcol2:
-                st.metric("Min Power", f"{min_power:.3f} MW", help="np.min(power_mean_MW)")
-            with pcol3:
-                st.metric("Max Power", f"{max_power:.3f} MW", help="np.max(power_mean_MW)")
-            with pcol4:
-                st.metric("Variation (ΔP)", f"{power_variation:.3f} MW", help="Max - Min")
-            
-            # Power plot (t=0.1-0.9)
-            fig, ax = plt.subplots(figsize=(10, 4))
-            t_valid = t[valid_idx]
-            
-            # Plot posterior samples (light blue)
-            if 'samples' in power_results and power_results['samples'] is not None:
-                samples = power_results['samples']
-                samples_valid = samples[:, valid_idx]
-                n_plot_samples = min(20, samples.shape[0])
-                for i in range(n_plot_samples):
-                    ax.plot(t_valid, samples_valid[i], 'steelblue', alpha=0.12, linewidth=0.7,
-                           label='GP Posterior Samples' if i == 0 else '')
-            
-            # Plot GP mean (power_mean_MW) - dark blue line
-            ax.plot(t_valid, power_results['power_mean_MW'][valid_idx], 'darkblue', linewidth=2.5, 
-                   label='GP Mean Prediction (power_mean_MW)', zorder=5)
-            
-            # Plot 95% CI
-            ax.fill_between(t_valid, power_results['power_lower_95_MW'][valid_idx], 
-                          power_results['power_upper_95_MW'][valid_idx],
-                          alpha=0.15, color='gray', label='95% CI', zorder=3)
-            
-            # Plot time-averaged value of GP mean
-            ax.axhline(y=mean_power, color='red', linestyle='--', linewidth=2, alpha=0.8,
-                      label=f'Time-Average of GP Mean: {mean_power:.3f} MW', zorder=4)
-            
-            ax.set_xlabel('Normalized Time')
-            ax.set_ylabel('Power (MW)')
-            ax.set_title(f'GP Power Prediction (t=0.1-0.9): Misalign={optimal_misalign_upstream:.0f}°, Yaw={actual_yaw_upstream:.0f}° | ΔP={power_variation:.3f} MW')
-            ax.legend(loc='best', fontsize=8, ncol=2)
-            ax.grid(True, alpha=0.3)
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
-            
-            st.markdown(f"""
-            **📊 Plot Legend:**
-            | Line Type | Description | Computation |
-            |-----------|-------------|-------------|
-            | **Light blue lines** | GP posterior samples | Random draws from GP distribution (samples array) |
-            | **Dark blue line** | GP mean prediction | `power_mean_MW` - GP's expected value at each time point |
-            | **Red dashed line** | Time-average of dark blue line | `np.mean(power_mean_MW)` = {mean_power:.3f} MW |
-            
-            **Statistics Computed from Analytical GP Mean (t=0.1-0.9):**
-            - **Time-Averaged** = `np.mean(power_mean_MW)` = {mean_power:.3f} MW
-            - **Min Power** = `np.min(power_mean_MW)` = {min_power:.3f} MW  
-            - **Max Power** = `np.max(power_mean_MW)` = {max_power:.3f} MW
-            - **Variation** = Max - Min = {power_variation:.3f} MW
-            """)
-            
-        except Exception as e:
-            st.error(f"Power prediction failed: {e}")
-            results["power"] = None
+            try:
+                power_agent, wake_agent = load_agents()
+                
+                power_results = power_agent.predict(
+                    yaw_angle=optimal_yaw_power_ml,
+                    n_time_points=n_timesteps,
+                    return_samples=True,
+                    n_samples=50
+                )
+                
+                # Use time range 0.1 to 0.9 for all computations
+                t = power_results['normalized_time']
+                valid_idx = (t >= 0.1) & (t <= 0.9)
+                
+                # Calculate statistics from power_mean_MW vector (analytical GP mean)
+                mean_power = np.mean(power_results['power_mean_MW'][valid_idx])
+                min_power = np.min(power_results['power_mean_MW'][valid_idx])
+                max_power = np.max(power_results['power_mean_MW'][valid_idx])
+                power_variation = max_power - min_power
+                uncertainty = np.mean(power_results['power_std_MW'][valid_idx])
+                
+                results["power"] = {
+                    "mean_MW": mean_power,
+                    "min_MW": min_power,
+                    "max_MW": max_power,
+                    "variation_MW": power_variation,
+                    "uncertainty_MW": uncertainty,
+                    "time_series": power_results
+                }
+                
+                progress_bar.progress(85)
+                
+                st.success(f"✅ Power prediction complete!")
+                
+                # Display power metrics from analytical GP mean (t=0.1-0.9)
+                st.markdown("**📈 Power Statistics from Analytical GP Mean (t=0.1-0.9):**")
+                pcol1, pcol2, pcol3, pcol4 = st.columns(4)
+                with pcol1:
+                    st.metric("Time-Averaged", f"{mean_power:.3f} MW", help="np.mean(power_mean_MW)")
+                with pcol2:
+                    st.metric("Min Power", f"{min_power:.3f} MW", help="np.min(power_mean_MW)")
+                with pcol3:
+                    st.metric("Max Power", f"{max_power:.3f} MW", help="np.max(power_mean_MW)")
+                with pcol4:
+                    st.metric("Variation (ΔP)", f"{power_variation:.3f} MW", help="Max - Min")
+                
+                # Power plot (t=0.1-0.9)
+                fig, ax = plt.subplots(figsize=(10, 4))
+                t_valid = t[valid_idx]
+                
+                # Plot posterior samples (light blue)
+                if 'samples' in power_results and power_results['samples'] is not None:
+                    samples = power_results['samples']
+                    samples_valid = samples[:, valid_idx]
+                    n_plot_samples = min(20, samples.shape[0])
+                    for i in range(n_plot_samples):
+                        ax.plot(t_valid, samples_valid[i], 'steelblue', alpha=0.12, linewidth=0.7,
+                               label='GP Posterior Samples' if i == 0 else '')
+                
+                # Plot GP mean (power_mean_MW) - dark blue line
+                ax.plot(t_valid, power_results['power_mean_MW'][valid_idx], 'darkblue', linewidth=2.5, 
+                       label='GP Mean Prediction (power_mean_MW)', zorder=5)
+                
+                # Plot 95% CI
+                ax.fill_between(t_valid, power_results['power_lower_95_MW'][valid_idx], 
+                              power_results['power_upper_95_MW'][valid_idx],
+                              alpha=0.15, color='gray', label='95% CI', zorder=3)
+                
+                # Plot time-averaged value of GP mean
+                ax.axhline(y=mean_power, color='red', linestyle='--', linewidth=2, alpha=0.8,
+                          label=f'Time-Average of GP Mean: {mean_power:.3f} MW', zorder=4)
+                
+                ax.set_xlabel('Normalized Time')
+                ax.set_ylabel('Power (MW)')
+                ax.set_title(f'GP Power Prediction (t=0.1-0.9): Misalign={optimal_misalign_upstream:.0f}°, Yaw={actual_yaw_upstream:.0f}° | ΔP={power_variation:.3f} MW')
+                ax.legend(loc='best', fontsize=8, ncol=2)
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+                
+                st.markdown(f"""
+                **📊 Plot Legend:**
+                | Line Type | Description | Computation |
+                |-----------|-------------|-------------|
+                | **Light blue lines** | GP posterior samples | Random draws from GP distribution (samples array) |
+                | **Dark blue line** | GP mean prediction | `power_mean_MW` - GP's expected value at each time point |
+                | **Red dashed line** | Time-average of dark blue line | `np.mean(power_mean_MW)` = {mean_power:.3f} MW |
+                
+                **Statistics Computed from Analytical GP Mean (t=0.1-0.9):**
+                - **Time-Averaged** = `np.mean(power_mean_MW)` = {mean_power:.3f} MW
+                - **Min Power** = `np.min(power_mean_MW)` = {min_power:.3f} MW  
+                - **Max Power** = `np.max(power_mean_MW)` = {max_power:.3f} MW
+                - **Variation** = Max - Min = {power_variation:.3f} MW
+                """)
+                
+            except Exception as e:
+                st.error(f"Power prediction failed: {e}")
+                results["power"] = None
+    else:
+        st.info("⏭️ Agent 5 (Power Predictor) is disabled. Enable it in Analysis Settings to run.")
+        results["power"] = None
     
     progress_bar.progress(95)
     
