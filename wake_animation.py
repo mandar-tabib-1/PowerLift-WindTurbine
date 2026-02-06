@@ -62,7 +62,7 @@ def create_wake_animation_3d(
     frame_skip: int = 2,
     view_angle: Tuple[float, float, float] = (45, -45, 0),
     scalar_bar: bool = True,
-    show_turbine: bool = True,
+    show_turbine: bool = False,
     cmap: str = "coolwarm",
     background_color: str = "white",
     window_size: Tuple[int, int] = (1200, 600),
@@ -415,6 +415,55 @@ def create_wake_slice_animation(
     return output_path
 
 
+def get_rotated_turbine_marker(turbine_x: float, turbine_y: float, rotor_half: float, 
+                               yaw_misalignment: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate rotated turbine rotor marker coordinates based on yaw misalignment.
+    
+    The rotor is initially vertical (aligned with Y-axis). It rotates clockwise 
+    as yaw_misalignment increases.
+    
+    Args:
+        turbine_x: Center X position of turbine
+        turbine_y: Center Y position of turbine
+        rotor_half: Half-length of rotor (distance from center to blade tip)
+        yaw_misalignment: Yaw angle in degrees (0-15 typical). Positive = clockwise rotation
+    
+    Returns:
+        Tuple of (x_coords, y_coords) for the rotor line endpoints and center
+    """
+    # Convert yaw angle from degrees to radians (clockwise = positive)
+    angle_rad = np.radians(yaw_misalignment)
+    
+    # Initial rotor endpoints (vertical line): top and bottom
+    # Top point: (turbine_x, turbine_y + rotor_half)
+    # Bottom point: (turbine_x, turbine_y - rotor_half)
+    
+    # Rotate both endpoints around the turbine center
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    
+    # Rotate top point (0, rotor_half) around origin
+    x_top_rot = 0 * cos_a + rotor_half * sin_a
+    y_top_rot = -0 * sin_a + rotor_half * cos_a
+    
+    # Rotate bottom point (0, -rotor_half) around origin
+    x_bottom_rot = 0 * cos_a - rotor_half * sin_a
+    y_bottom_rot = -0 * sin_a - rotor_half * cos_a
+    
+    # Translate back to turbine position
+    x_top = turbine_x + x_top_rot
+    y_top = turbine_y + y_top_rot
+    x_bottom = turbine_x + x_bottom_rot
+    y_bottom = turbine_y + y_bottom_rot
+    
+    # Return line endpoints as arrays
+    x_coords = np.array([x_bottom, x_top])
+    y_coords = np.array([y_bottom, y_top])
+    
+    return x_coords, y_coords
+
+
 def create_wake_contour_animation(
     predictions: np.ndarray,
     grid_path: str = None,
@@ -426,7 +475,8 @@ def create_wake_contour_animation(
     n_levels: int = 30,
     clim: Optional[Tuple[float, float]] = None,
     verbose: bool = True,
-    max_points: int = 10000  # Limit points for fast rendering
+    max_points: int = 10000,  # Limit points for fast rendering
+    yaw_misalignment: float = 0.0  # Yaw misalignment angle in degrees
 ) -> Optional[str]:
     """
     Create a fast contour-style animation similar to ParaView visualization.
@@ -445,6 +495,7 @@ def create_wake_contour_animation(
         clim: Color limits
         verbose: Print progress
         max_points: Maximum points to use (sampling for speed)
+        yaw_misalignment: Yaw misalignment angle in degrees (rotates turbine marker clockwise)
         
     Returns:
         Animation file path or None
@@ -501,7 +552,7 @@ def create_wake_contour_animation(
         print(f"  Triangulation failed: {e}")
         print(f"  Falling back to scatter plot...")
         return create_wake_scatter_animation(
-            predictions, grid_path, output_path, fps, frame_skip, cmap, figsize, clim, verbose
+            predictions, grid_path, output_path, fps, frame_skip, cmap, figsize, clim, verbose, yaw_misalignment=yaw_misalignment
         )
     
     # Create figure
@@ -530,10 +581,10 @@ def create_wake_contour_animation(
         # Fast tricontourf using pre-computed triangulation
         contour = ax.tricontourf(triang, vel, levels=levels, cmap=cmap, extend='both')
         
-        # Add turbine
-        ax.plot([turbine_x, turbine_x], [turbine_y - rotor_half, turbine_y + rotor_half], 
-                'k-', linewidth=5)
-        ax.plot(turbine_x, turbine_y, 'ko', markersize=10)
+        # Add rotated turbine marker
+        x_rotor, y_rotor = get_rotated_turbine_marker(turbine_x, turbine_y, rotor_half, yaw_misalignment)
+        ax.plot(x_rotor, y_rotor, 'k-', linewidth=5, label='Rotor')
+        ax.plot(turbine_x, turbine_y, 'ko', markersize=10, label='Hub')
         
         ax.set_xlabel('X (m)', fontsize=11)
         ax.set_ylabel('Y (m)', fontsize=11)
@@ -583,10 +634,27 @@ def create_wake_scatter_animation(
     figsize: Tuple[int, int] = (14, 5),
     clim: Optional[Tuple[float, float]] = None,
     verbose: bool = True,
-    max_points: int = 8000
+    max_points: int = 8000,
+    yaw_misalignment: float = 0.0  # Yaw misalignment angle in degrees
 ) -> Optional[str]:
     """
     Create a fast scatter-based animation (fallback for triangulation issues).
+    
+    Args:
+        predictions: Velocity field (n_timesteps, n_points, 3)
+        grid_path: Path to VTK grid
+        output_path: Output animation path
+        fps: Frames per second
+        frame_skip: Skip frames
+        cmap: Colormap
+        figsize: Figure size
+        clim: Color limits
+        verbose: Print progress
+        max_points: Maximum points to use for scatter
+        yaw_misalignment: Yaw misalignment angle in degrees (rotates turbine marker clockwise)
+    
+    Returns:
+        Animation file path or None
     """
     if not PYVISTA_AVAILABLE or not MATPLOTLIB_AVAILABLE:
         return None
@@ -645,9 +713,10 @@ def create_wake_scatter_animation(
         scatter = ax.scatter(x_pts, y_pts, c=vel, cmap=cmap, s=1, 
                             vmin=clim[0], vmax=clim[1])
         
-        ax.plot([turbine_x, turbine_x], [turbine_y - rotor_half, turbine_y + rotor_half],
-                'k-', linewidth=5)
-        ax.plot(turbine_x, turbine_y, 'ko', markersize=10)
+        # Add rotated turbine marker
+        x_rotor, y_rotor = get_rotated_turbine_marker(turbine_x, turbine_y, rotor_half, yaw_misalignment)
+        ax.plot(x_rotor, y_rotor, 'k-', linewidth=5, label='Rotor')
+        ax.plot(turbine_x, turbine_y, 'ko', markersize=10, label='Hub')
         
         ax.set_xlabel('X (m)')
         ax.set_ylabel('Y (m)')

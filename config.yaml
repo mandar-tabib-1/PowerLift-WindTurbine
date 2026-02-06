@@ -12,4 +12,4 @@ llm:
   # Generation Parameters
   temperature: 0.1  # Lower = more deterministic, Higher = more creative
   max_tokens: 100000  # Maximum tokens for output generation
-  timeout: 2000.0  # Request timeout in seconds
+  timeout: 4000.0  # Request timeout in seconds

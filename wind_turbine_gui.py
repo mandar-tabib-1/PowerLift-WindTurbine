@@ -22,6 +22,7 @@ from pathlib import Path
 from datetime import datetime
 import openai
 import requests
+import pydeck as pdk
 
 #To do,
 #I get the error ⚠️ Agent 2B: Could not connect to LLM. Error: query_local_llm() got an unexpected keyword argument 'temperature' . I have added a new folder called LLM that could be useful with ntnu_llm.py and base.py , and it could be useful for connecting to the specfic Ntnu server where the local llm is. 
@@ -1765,11 +1766,19 @@ def main():
             index=0 if llm_provider == "NTNU" else 0,
             help=f"Select the {llm_provider} model to use"
         )
+        explore_vs_acc = st.slider(
+        "Exploration vs Accuracy",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.1,  # Default value
+        step=0.1,  # Step size for the slider
+        help="Select a value between 0 (accuracy) and 1 (exploration)"
+    )
         
         # Store in session state
         st.session_state.llm_provider = llm_provider
         st.session_state.selected_model = selected_model
-        
+        st.session_state.explore_vs_acc = explore_vs_acc
         # Show current configuration
         with st.expander("Current LLM Configuration"):
             st.code(f"Provider: {llm_provider}\nModel: {selected_model}", language="yaml")
@@ -1860,25 +1869,183 @@ def main():
             turbine_map_data = create_turbine_map(farm_info, search_results['turbine_locations'])
             
             if turbine_map_data is not None:
+                # Get wind direction from weather data if available
+                wind_direction = None
+                wind_speed = None
+                if 'results' in st.session_state and st.session_state.results:
+                    weather_data = st.session_state.results.get('weather', {})
+                    wind_direction = weather_data.get('wind_direction_deg')
+                    wind_speed = weather_data.get('wind_speed_ms')
+                
+                wind_info = ""
+                if wind_direction is not None and wind_speed is not None:
+                    wind_info = f"\n- **Wind Conditions:** {wind_speed:.1f} m/s from {wind_direction:.0f}°"
+                
                 st.markdown(f"""
                 **Map Information:**
                 - Wind Farm: **{selected_farm}**
                 - Turbines Displayed: **{len(turbine_map_data)}**
                 - Data Source: **{search_results['data_source']}**
-                - Search Status: **{search_results['search_status']}**
+                - Search Status: **{search_results['search_status']}**{wind_info}
                 """)
                 
-                # Display the map
-                st.map(turbine_map_data, zoom=12)
+                # Prepare data for pydeck
+                turbine_map_data['turbine_label'] = 'T' + turbine_map_data['turbine_id'].astype(str)
+                
+                # Calculate optimal zoom level based on turbine spread
+                lat_spread = turbine_map_data['lat'].max() - turbine_map_data['lat'].min()
+                lon_spread = turbine_map_data['lon'].max() - turbine_map_data['lon'].min()
+                max_spread = max(lat_spread, lon_spread)
+                
+                # Calculate zoom level (higher zoom for smaller spread)
+                if max_spread < 0.01:  # Very close turbines
+                    optimal_zoom = 14
+                elif max_spread < 0.05:  # Close turbines  
+                    optimal_zoom = 13
+                elif max_spread < 0.1:   # Medium spread
+                    optimal_zoom = 12
+                else:                    # Wide spread
+                    optimal_zoom = 11
+                
+                # Create turbine scatter layer with adaptive sizing
+                turbine_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=turbine_map_data,
+                    get_position=["lon", "lat"],
+                    get_fill_color=[0, 120, 255, 200],
+                    get_radius=100,
+                    radius_min_pixels=15,  # Minimum size when zoomed out
+                    radius_max_pixels=100, # Maximum size when zoomed in
+                    pickable=True,
+                    auto_highlight=True,
+                )
+                
+                # Create text layer for turbine numbers with adaptive sizing
+                text_layer = pdk.Layer(
+                    "TextLayer",
+                    data=turbine_map_data,
+                    get_position=["lon", "lat"],
+                    get_text="turbine_label",
+                    get_color=[255, 255, 255, 255],
+                    get_size=16,
+                    size_min_pixels=12,    # Minimum text size when zoomed out
+                    size_max_pixels=24,    # Maximum text size when zoomed in
+                    get_alignment_baseline="'center'",
+                    get_text_anchor="'middle'",
+                )
+                
+                layers = [turbine_layer, text_layer]
+                
+                # Add wind direction arrow if available
+                if wind_direction is not None:
+                    # Position wind arrow near the turbine cluster center
+                    center_lat = turbine_map_data['lat'].mean()  # Use turbine center instead of farm center
+                    center_lon = turbine_map_data['lon'].mean()
+                    
+                    # Arrow length in degrees (larger for better visibility)
+                    arrow_length = max(0.02, max_spread * 0.5)  # Scale with turbine spread
+                    
+                    # Convert wind direction to arrow direction (wind blows FROM wind_direction TO opposite)
+                    # Arrow should point in the direction wind is BLOWING TO
+                    arrow_direction = (wind_direction + 180) % 360
+                    arrow_rad = np.radians(arrow_direction)
+                    
+                    # Calculate arrow end point
+                    end_lat = center_lat + arrow_length * np.cos(arrow_rad)
+                    end_lon = center_lon + arrow_length * np.sin(arrow_rad) / np.cos(np.radians(center_lat))
+                    
+                    wind_arrow_data = pd.DataFrame([{
+                        'start_lat': center_lat,
+                        'start_lon': center_lon,
+                        'end_lat': end_lat,
+                        'end_lon': end_lon,
+                        'wind_dir': wind_direction
+                    }])
+                    
+                    # Create arrow layer using LineLayer with better visibility
+                    arrow_layer = pdk.Layer(
+                        "LineLayer",
+                        data=wind_arrow_data,
+                        get_source_position=["start_lon", "start_lat"],
+                        get_target_position=["end_lon", "end_lat"],
+                        get_color=[255, 0, 0, 255],  # Full opacity
+                        get_width=10,
+                        width_min_pixels=5,
+                        width_max_pixels=15,
+                    )
+                    
+                    # Add larger arrow head using ScatterplotLayer
+                    arrow_head_layer = pdk.Layer(
+                        "ScatterplotLayer",
+                        data=wind_arrow_data,
+                        get_position=["end_lon", "end_lat"],
+                        get_fill_color=[255, 0, 0, 255],  # Full opacity
+                        get_radius=150,
+                        radius_min_pixels=8,
+                        radius_max_pixels=25,
+                        pickable=False,
+                    )
+                    
+                    # Add text label for wind direction (positioned offset from turbines)
+                    wind_label_data = pd.DataFrame([{
+                        'lat': center_lat + arrow_length * 0.8,  # Position at arrow end
+                        'lon': center_lon + arrow_length * 0.2,
+                        'label': f'Wind: {wind_direction:.0f}° ({wind_speed:.1f} m/s)'
+                    }])
+                    
+                    wind_text_layer = pdk.Layer(
+                        "TextLayer",
+                        data=wind_label_data,
+                        get_position=["lon", "lat"],
+                        get_text="label",
+                        get_color=[255, 0, 0, 255],
+                        get_size=16,
+                        size_min_pixels=14,
+                        size_max_pixels=20,
+                        get_alignment_baseline="'center'",
+                        get_text_anchor="'middle'",
+                        background=True,
+                        get_background_color=[255, 255, 255, 220],
+                    )
+                    
+                    layers.extend([arrow_layer, arrow_head_layer, wind_text_layer])
+                
+                # Create the deck with optimal view
+                view_state = pdk.ViewState(
+                    latitude=turbine_map_data['lat'].mean(),  # Center on turbines
+                    longitude=turbine_map_data['lon'].mean(),
+                    zoom=optimal_zoom,
+                    pitch=0,
+                )
+                
+                deck = pdk.Deck(
+                    layers=layers,
+                    initial_view_state=view_state,
+                    tooltip={
+                        "text": "Turbine {turbine_id}\nLat: {lat:.6f}\nLon: {lon:.6f}\nType: {type}"
+                    },
+                    map_style="road",
+                )
+                
+                # Display the enhanced map
+                st.pydeck_chart(deck)
+                
+                # Add legend
+                st.markdown("""
+                **Map Legend:**
+                - 🔵 **Blue circles with numbers** = Turbine locations (T1, T2, ...)
+                - 🔴 **Red arrow** = Wind direction (arrow points in direction wind is blowing)
+                - **Hover over turbines** for detailed information
+                """)
                 
                 # Show turbine details in expandable section
                 with st.expander(f"📋 Turbine Details ({len(turbine_map_data)} turbines)"):
                     st.dataframe(
-                        turbine_map_data,
+                        turbine_map_data[['turbine_id', 'lat', 'lon', 'type']],
                         column_config={
+                            "turbine_id": st.column_config.NumberColumn("Turbine ID", help="Unique turbine identifier used by agents"),
                             "lat": st.column_config.NumberColumn("Latitude", format="%.6f"),
                             "lon": st.column_config.NumberColumn("Longitude", format="%.6f"),
-                            "turbine_id": st.column_config.NumberColumn("Turbine ID"),
                             "type": st.column_config.TextColumn("Data Type")
                         },
                         hide_index=True,
@@ -2002,58 +2169,65 @@ def main():
             if power_result:
                 power_time_series = power_result['power_mean_MW']
                 std_time_series = power_result['power_std_MW']
-                
-                # Time-varying statistics
-                mean_power = np.mean(power_time_series)
-                min_power = np.min(power_time_series)
-                max_power = np.max(power_time_series)
-                power_variation = max_power - min_power
-                
-                # Display transient statistics
-                st.markdown("**📈 Transient Power Statistics (GP Posterior Mean):**")
-                pcol1, pcol2, pcol3, pcol4 = st.columns(4)
-                with pcol1:
-                    st.metric("Time-Averaged", f"{mean_power:.3f} MW")
-                with pcol2:
-                    st.metric("Min Power", f"{min_power:.3f} MW")
-                with pcol3:
-                    st.metric("Max Power", f"{max_power:.3f} MW")
-                with pcol4:
-                    st.metric("Variation (ΔP)", f"{power_variation:.3f} MW")
-                
-                # Power time series plot - emphasize the transient nature
-                fig_power, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4))
                 t = power_result['normalized_time']
                 
-                # Left plot: Full time series with samples
+                # Use time range 0.1 to 0.9 for statistics
+                valid_idx = (t >= 0.1) & (t <= 0.9)
+                t_valid = t[valid_idx]
+                
+                # Calculate statistics from power_mean_MW vector (analytical GP mean)
+                mean_power = np.mean(power_time_series[valid_idx])
+                min_power = np.min(power_time_series[valid_idx])
+                max_power = np.max(power_time_series[valid_idx])
+                power_variation = max_power - min_power
+                
+                # Display statistics from analytical GP mean (t=0.1-0.9)
+                st.markdown("**📈 Power Statistics from Analytical GP Mean (t=0.1-0.9):**")
+                pcol1, pcol2, pcol3, pcol4 = st.columns(4)
+                with pcol1:
+                    st.metric("Time-Averaged", f"{mean_power:.3f} MW", help="np.mean(power_mean_MW)")
+                with pcol2:
+                    st.metric("Min Power", f"{min_power:.3f} MW", help="np.min(power_mean_MW)")
+                with pcol3:
+                    st.metric("Max Power", f"{max_power:.3f} MW", help="np.max(power_mean_MW)")
+                with pcol4:
+                    st.metric("Variation (ΔP)", f"{power_variation:.3f} MW", help="Max - Min")
+                
+                # Power time series plot (t=0.1-0.9)
+                fig_power, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4))
+                
+                # Left plot: Time series with samples (t=0.1-0.9)
                 if 'samples' in power_result and power_result['samples'] is not None:
                     samples = power_result['samples']
+                    samples_valid = samples[:, valid_idx]
                     for i in range(min(15, samples.shape[0])):
-                        ax1.plot(t, samples[i], 'steelblue', alpha=0.15, linewidth=0.8)
-                    ax1.plot(t, samples[0], 'b-', linewidth=1, label='GP Samples (transient)', alpha=0.6)
+                        ax1.plot(t_valid, samples_valid[i], 'steelblue', alpha=0.12, linewidth=0.7,
+                                label='GP Posterior Samples' if i == 0 else '')
                 
-                ax1.plot(t, power_time_series, 'r-', linewidth=2.5, label=f'GP Mean (transient)')
-                ax1.fill_between(t, power_result['power_lower_95_MW'], power_result['power_upper_95_MW'],
-                               alpha=0.2, color='gray', label='95% CI')
+                ax1.plot(t_valid, power_time_series[valid_idx], 'darkblue', linewidth=2.5, 
+                        label='GP Mean Prediction (power_mean_MW)')
+                ax1.fill_between(t_valid, power_result['power_lower_95_MW'][valid_idx], 
+                                power_result['power_upper_95_MW'][valid_idx],
+                               alpha=0.15, color='gray', label='95% CI')
                 
-                ax1.axhline(y=mean_power, color='green', linestyle='--', alpha=0.7, 
-                           label=f'Time-avg: {mean_power:.3f} MW')
+                ax1.axhline(y=mean_power, color='red', linestyle='--', linewidth=2, alpha=0.8,
+                           label=f'Time-Average of GP Mean: {mean_power:.3f} MW')
                 
                 ax1.set_xlabel('Normalized Time')
                 ax1.set_ylabel('Power (MW)')
-                ax1.set_title(f'GP Transient Power Prediction\nYaw Misalignment = {st.session_state.get("demo_yaw", 0):.0f}°')
+                ax1.set_title(f'GP Power Prediction (t=0.1-0.9)\nYaw Misalignment = {st.session_state.get("demo_yaw", 0):.0f}°')
                 ax1.legend(loc='best', fontsize=8)
                 ax1.grid(True, alpha=0.3)
                 
-                # Right plot: Power distribution histogram
-                ax2.hist(power_time_series, bins=20, density=True, alpha=0.7, color='steelblue', 
+                # Right plot: Power distribution histogram (using valid data)
+                ax2.hist(power_time_series[valid_idx], bins=20, density=True, alpha=0.7, color='steelblue', 
                         edgecolor='black', label='Power distribution')
                 ax2.axvline(x=mean_power, color='red', linestyle='-', linewidth=2, label=f'Mean: {mean_power:.3f} MW')
                 ax2.axvline(x=min_power, color='green', linestyle='--', linewidth=1.5, label=f'Min: {min_power:.3f} MW')
                 ax2.axvline(x=max_power, color='orange', linestyle='--', linewidth=1.5, label=f'Max: {max_power:.3f} MW')
                 ax2.set_xlabel('Power (MW)')
                 ax2.set_ylabel('Probability Density')
-                ax2.set_title(f'Power Distribution over Time\n(ΔP = {power_variation:.3f} MW)')
+                ax2.set_title(f'Power Distribution (t=0.1-0.9)\n(ΔP = {power_variation:.3f} MW)')
                 ax2.legend(loc='best', fontsize=8)
                 ax2.grid(True, alpha=0.3)
                 
@@ -2061,7 +2235,20 @@ def main():
                 st.pyplot(fig_power)
                 plt.close()
                 
-                st.caption(f"**Note:** The GP model predicts a **time-varying** power signal (vector of {len(power_time_series)} timesteps), not a single constant value. The transient behavior captures turbulent fluctuations in rotor power.")
+                st.markdown(f"""
+                **📊 Plot Legend:**
+                | Line Type | Description | Computation |
+                |-----------|-------------|-------------|
+                | **Light blue lines** | GP posterior samples | Random draws from GP distribution (samples array) |
+                | **Dark blue line** | GP mean prediction | `power_mean_MW` - GP's expected value at each time point |
+                | **Red dashed line** | Time-average of dark blue line | `np.mean(power_mean_MW)` = {mean_power:.3f} MW |
+                
+                **Statistics Computed (t=0.1-0.9):**
+                - Time-Averaged = `np.mean(power_mean_MW)` = {mean_power:.3f} MW
+                - Min Power = `np.min(power_mean_MW)` = {min_power:.3f} MW  
+                - Max Power = `np.max(power_mean_MW)` = {max_power:.3f} MW
+                - Variation = Max - Min = {power_variation:.3f} MW
+                """)
         
         with demo_tab2:
             st.markdown(f"#### TT-OpInf Wake Flow ROM at Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}°")
@@ -2093,8 +2280,8 @@ def main():
                         fps=8,
                         frame_skip=max(1, wake_predictions.shape[0] // 15),
                         cmap="RdYlBu_r",
-                        verbose=False
-                        #yaw_angle=st.session_state.get('demo_nacelle', 270)
+                        verbose=False,
+                        yaw_misalignment=st.session_state.get('demo_yaw', 0)
                     )
                     
                     st.image(demo_anim_path, caption=f"Wake Flow | Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}° | Nacelle = {st.session_state.get('demo_nacelle', 270):.0f}°")
@@ -2298,8 +2485,14 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
     </p>
     ''', unsafe_allow_html=True)
     
-    # LLM Configuration - Load from config.yaml
-    llm_config = load_llm_config()
+    # LLM Configuration - Use GUI selections from session state
+    # Don't load from config.yaml - use the selections from the sidebar
+    llm_config = None  # This will trigger get_llm_expert_recommendation to use session state
+    
+    # Show current LLM configuration being used
+    current_provider = st.session_state.get('llm_provider', 'NTNU')
+    current_model = st.session_state.get('selected_model', 'moonshotai/Kimi-K2.5')
+    st.info(f"🤖 Using LLM: **{current_provider}** - **{current_model}**")
     
     status_text.text("🔄 Agent 2B: Loading LLM configuration and querying for expert recommendations...")
     time.sleep(0.5)
@@ -2309,7 +2502,7 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
             llm_result = get_llm_expert_recommendation(
                 wind_speed=weather['wind_speed_ms'],
                 wind_direction=weather['wind_direction_deg'],
-                config=llm_config
+                config=llm_config  # Pass None to use session state configuration
             )
             
             results['llm_expert'] = llm_result
@@ -2330,7 +2523,8 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
         with st.expander("ℹ️ About Agent 2B"):
             config_info = llm_result.get('config', {})
             st.markdown(f"""
-            **Agent 2B Configuration (from config.yaml):**
+            **Agent 2B Configuration (from GUI selections):**
+            - **Provider:** {config_info.get('provider', 'N/A')}
             - **Model:** {config_info.get('model', 'N/A')}
             - **API Base:** {config_info.get('api_base', 'N/A')}
             - **Temperature:** {config_info.get('temperature', 0.1)}
@@ -2339,8 +2533,8 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
             - **Input:** Wind Speed ({llm_result['wind_speed']:.2f} m/s), Wind Direction ({llm_result['wind_direction']:.1f}°)
             
             **How it works:**
-            1. Agent 2B loads configuration from `config.yaml`
-            2. Queries a local LLM server using OpenAI-compatible API
+            1. Agent 2B uses the LLM provider and model selected in the GUI sidebar
+            2. Queries the LLM server using OpenAI-compatible API
             3. The LLM is prompted with wind conditions and turbine specifications
             4. The LLM generates expert recommendations based on its training
             5. This provides an AI-powered second opinion alongside the rule-based Agent 2
@@ -2348,7 +2542,7 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
             **Note:** The LLM's recommendations may differ from the rule-based expert (Agent 2). 
             Both perspectives can be valuable for decision-making.
             
-            **Configuration:** Edit `config.yaml` to update API key, model, and generation parameters.
+            **Configuration:** Change the provider and model in the sidebar to use different AI services.
             """)
     
     # =========================================================================
@@ -2459,7 +2653,7 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
                         
                         with st.expander("ℹ️ About Agent 2C"):
                             st.markdown(f"""
-                            **Agent 2C Configuration:**
+                            **Agent 2C Configuration (from GUI selections):**
                             - **LLM Provider:** {turbine_pair_analysis['provider']}
                             - **LLM Model:** {turbine_pair_analysis['model']}
                             - **Total Turbines Analyzed:** {turbine_pair_analysis['total_turbines']}
@@ -2467,7 +2661,7 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
                             
                             **How it works:**
                             1. Agent 2C receives turbine locations from the location search
-                            2. It uses the same LLM configuration as Agent 2B
+                            2. It uses the LLM provider and model selected in the GUI sidebar (same as Agent 2B)
                             3. The LLM analyzes wind direction, turbine spacing, and wake patterns
                             4. It identifies the most critical upstream-downstream turbine pairs
                             5. These pairs are prioritized for wake optimization by Agent 3
@@ -2475,6 +2669,8 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
                             **Purpose:** This agent bridges single-turbine analysis (Agent 2B) with 
                             multi-turbine farm optimization by intelligently selecting which turbine 
                             pairs will benefit most from wake steering control.
+                            
+                            **Configuration:** Change the provider and model in the sidebar to use different AI services.
                             """)
                     
                     elif turbine_pair_analysis['status'] == 'partial':
@@ -2922,8 +3118,8 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
                         fps=8,
                         frame_skip=max(1, predictions.shape[0] // 20),
                         cmap="RdYlBu_r",
-                        verbose=False
-                        #yaw_angle=optimal_yaw_ml
+                        verbose=False,
+                        yaw_misalignment=optimal_misalign_upstream
                     )
                    
                     
@@ -2994,13 +3190,22 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
                 n_samples=50
             )
             
-            mean_power = np.mean(power_results['power_mean_MW'])
-            max_power = np.max(power_results['power_mean_MW'])
-            uncertainty = np.mean(power_results['power_std_MW'])
+            # Use time range 0.1 to 0.9 for all computations
+            t = power_results['normalized_time']
+            valid_idx = (t >= 0.1) & (t <= 0.9)
+            
+            # Calculate statistics from power_mean_MW vector (analytical GP mean)
+            mean_power = np.mean(power_results['power_mean_MW'][valid_idx])
+            min_power = np.min(power_results['power_mean_MW'][valid_idx])
+            max_power = np.max(power_results['power_mean_MW'][valid_idx])
+            power_variation = max_power - min_power
+            uncertainty = np.mean(power_results['power_std_MW'][valid_idx])
             
             results["power"] = {
                 "mean_MW": mean_power,
+                "min_MW": min_power,
                 "max_MW": max_power,
+                "variation_MW": power_variation,
                 "uncertainty_MW": uncertainty,
                 "time_series": power_results
             }
@@ -3009,42 +3214,67 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
             
             st.success(f"✅ Power prediction complete!")
             
-            # Display power metrics
-            pcol1, pcol2, pcol3 = st.columns(3)
+            # Display power metrics from analytical GP mean (t=0.1-0.9)
+            st.markdown("**📈 Power Statistics from Analytical GP Mean (t=0.1-0.9):**")
+            pcol1, pcol2, pcol3, pcol4 = st.columns(4)
             with pcol1:
-                st.metric("Mean Power", f"{mean_power:.3f} MW")
+                st.metric("Time-Averaged", f"{mean_power:.3f} MW", help="np.mean(power_mean_MW)")
             with pcol2:
-                st.metric("Peak Power", f"{max_power:.3f} MW")
+                st.metric("Min Power", f"{min_power:.3f} MW", help="np.min(power_mean_MW)")
             with pcol3:
-                st.metric("Uncertainty (±1σ)", f"±{uncertainty:.3f} MW")
+                st.metric("Max Power", f"{max_power:.3f} MW", help="np.max(power_mean_MW)")
+            with pcol4:
+                st.metric("Variation (ΔP)", f"{power_variation:.3f} MW", help="Max - Min")
             
-            # Power plot showing transient samples
+            # Power plot (t=0.1-0.9)
             fig, ax = plt.subplots(figsize=(10, 4))
-            t = power_results['normalized_time']
+            t_valid = t[valid_idx]
             
-            # Plot posterior samples
+            # Plot posterior samples (light blue)
             if 'samples' in power_results and power_results['samples'] is not None:
                 samples = power_results['samples']
+                samples_valid = samples[:, valid_idx]
                 n_plot_samples = min(20, samples.shape[0])
                 for i in range(n_plot_samples):
-                    ax.plot(t, samples[i], 'steelblue', alpha=0.15, linewidth=0.8)
-                ax.plot(t, samples[0], 'b-', linewidth=1.5, label='Transient Sample', alpha=0.8)
+                    ax.plot(t_valid, samples_valid[i], 'steelblue', alpha=0.12, linewidth=0.7,
+                           label='GP Posterior Samples' if i == 0 else '')
             
-            ax.plot(t, power_results['power_mean_MW'], 'r--', linewidth=1.5, 
-                   label=f'Mean ({mean_power:.3f} MW)', alpha=0.9)
+            # Plot GP mean (power_mean_MW) - dark blue line
+            ax.plot(t_valid, power_results['power_mean_MW'][valid_idx], 'darkblue', linewidth=2.5, 
+                   label='GP Mean Prediction (power_mean_MW)', zorder=5)
             
-            ax.fill_between(t, power_results['power_lower_95_MW'], 
-                          power_results['power_upper_95_MW'],
-                          alpha=0.15, color='gray', label='95% CI')
+            # Plot 95% CI
+            ax.fill_between(t_valid, power_results['power_lower_95_MW'][valid_idx], 
+                          power_results['power_upper_95_MW'][valid_idx],
+                          alpha=0.15, color='gray', label='95% CI', zorder=3)
+            
+            # Plot time-averaged value of GP mean
+            ax.axhline(y=mean_power, color='red', linestyle='--', linewidth=2, alpha=0.8,
+                      label=f'Time-Average of GP Mean: {mean_power:.3f} MW', zorder=4)
             
             ax.set_xlabel('Normalized Time')
             ax.set_ylabel('Power (MW)')
-            ax.set_title(f'Power Prediction (Misalign: {optimal_misalign_upstream:.0f}°, Actual Yaw: {actual_yaw_upstream:.0f}°)')
-            ax.legend(loc='best', fontsize=8)
+            ax.set_title(f'GP Power Prediction (t=0.1-0.9): Misalign={optimal_misalign_upstream:.0f}°, Yaw={actual_yaw_upstream:.0f}° | ΔP={power_variation:.3f} MW')
+            ax.legend(loc='best', fontsize=8, ncol=2)
             ax.grid(True, alpha=0.3)
             plt.tight_layout()
             st.pyplot(fig)
             plt.close()
+            
+            st.markdown(f"""
+            **📊 Plot Legend:**
+            | Line Type | Description | Computation |
+            |-----------|-------------|-------------|
+            | **Light blue lines** | GP posterior samples | Random draws from GP distribution (samples array) |
+            | **Dark blue line** | GP mean prediction | `power_mean_MW` - GP's expected value at each time point |
+            | **Red dashed line** | Time-average of dark blue line | `np.mean(power_mean_MW)` = {mean_power:.3f} MW |
+            
+            **Statistics Computed from Analytical GP Mean (t=0.1-0.9):**
+            - **Time-Averaged** = `np.mean(power_mean_MW)` = {mean_power:.3f} MW
+            - **Min Power** = `np.min(power_mean_MW)` = {min_power:.3f} MW  
+            - **Max Power** = `np.max(power_mean_MW)` = {max_power:.3f} MW
+            - **Variation** = Max - Min = {power_variation:.3f} MW
+            """)
             
         except Exception as e:
             st.error(f"Power prediction failed: {e}")
