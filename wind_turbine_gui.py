@@ -104,6 +104,12 @@ if 'last_searched_farm' not in st.session_state:
     st.session_state.last_searched_farm = ''
 if 'show_turbine_map' not in st.session_state:
     st.session_state.show_turbine_map = False
+if 'app_mode' not in st.session_state:
+    st.session_state.app_mode = 'Wind Farm Analysis'
+if 'pdm_results' not in st.session_state:
+    st.session_state.pdm_results = None
+if 'pdm_models' not in st.session_state:
+    st.session_state.pdm_models = None
 
 
 # =============================================================================
@@ -168,6 +174,1524 @@ def load_agents():
     wake_agent = WakeFlowAgent()
     
     return power_agent, wake_agent
+
+
+# =============================================================================
+# Predictive Maintenance (PdM) Functions
+# =============================================================================
+
+def load_pdm_models_subprocess():
+    """
+    Load PdM models using separate Python environment with compatible scikit-learn.
+    
+    This function creates a subprocess with a dedicated virtual environment (.venv_pdm)
+    that has scikit-learn 1.3.0 installed, avoiding version conflicts with the main
+    GUI environment which uses scikit-learn 1.8.0.
+    
+    Returns:
+        dict or None: Models and test data, or None if loading fails
+    """
+    import subprocess
+    import tempfile
+    import pickle
+    
+    try:
+        # Path to PdM-specific Python interpreter
+        pdm_python = os.path.join(SCRIPT_DIR, '.venv_pdm', 'Scripts', 'python.exe')
+        
+        # Check if required files exist
+        rul_dir = os.path.join(SCRIPT_DIR, 'RUL')
+        save_models_path = os.path.join(rul_dir, 'save_models.py')
+        wind_turbine_pm_path = os.path.join(rul_dir, 'wind_turbine_pm_fuhrlander.py')
+        
+        if not os.path.exists(pdm_python):
+            st.error("❌ PdM environment not found at `.venv_pdm`")
+            
+            with st.expander("🔧 Setup Instructions - Create PdM Environment"):
+                st.markdown("""
+                **To create the PdM environment with compatible scikit-learn:**
+                
+                Open PowerShell in your project directory and run:
+                
+                ```powershell
+                # Create new virtual environment
+                python -m venv .venv_pdm
+                
+                # Activate it
+                & "\.venv_pdm\Scripts\Activate.ps1"
+                
+                # Install compatible scikit-learn + dependencies
+                pip install scikit-learn==1.3.0 numpy pandas joblib matplotlib
+                
+                # Verify installation
+                python -c "import sklearn; print(f'sklearn version: {sklearn.__version__}')"
+                
+                # Deactivate when done
+                deactivate
+                ```
+                
+                **What this does:**
+                - Creates `.venv_pdm/` with scikit-learn 1.3.0 (compatible with saved models)
+                - Your main `.venv/` keeps scikit-learn 1.8.0 (for other tasks)
+                - No conflicts between versions!
+                
+                **After setup, click "Load PdM Models" again.**
+                """)
+            
+            return None
+        
+        # Check if required Python modules exist
+        if not os.path.exists(save_models_path):
+            st.error(f"❌ Required file not found: `RUL/save_models.py`")
+            st.warning("Please ensure the RUL directory contains all necessary files.")
+            return None
+            
+        if not os.path.exists(wind_turbine_pm_path):
+            st.error(f"❌ Required file not found: `RUL/wind_turbine_pm_fuhrlander.py`")
+            st.warning("Please ensure the RUL directory contains all necessary files.")
+            return None
+        
+        # Create Python script to run in separate process
+        loader_script = """
+import sys
+import os
+
+# Add both parent directory and RUL directory to path
+parent_path = r'""" + str(SCRIPT_DIR).replace('\\', '\\\\') + """'
+rul_path = os.path.join(parent_path, 'RUL')
+
+# Ensure paths are absolute and exist
+if os.path.exists(rul_path):
+    sys.path.insert(0, rul_path)
+if os.path.exists(parent_path):
+    sys.path.insert(0, parent_path)
+
+# Change to RUL directory to ensure relative imports work
+os.chdir(rul_path)
+
+# Import and load models
+from save_models import load_all_models, load_test_data
+import pickle
+import tempfile
+
+# Load models using compatible sklearn
+models = load_all_models()
+test_data = load_test_data()
+
+# Serialize to temporary file
+with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.pkl') as f:
+    pickle.dump({
+        'models': models, 
+        'test_data': test_data,
+        'sklearn_version': __import__('sklearn').__version__
+    }, f)
+    print(f.name)  # Output temp file path to stdout
+"""
+        
+        # Run loader script in separate process
+        result = subprocess.run(
+            [pdm_python, '-c', loader_script],
+            cwd=SCRIPT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=60  # 60 second timeout
+        )
+        
+        if result.returncode != 0:
+            st.error("❌ Model loading subprocess failed")
+            st.code(result.stderr, language="text")
+            
+            with st.expander("🔍 Troubleshooting"):
+                st.markdown("""
+                **Common Issues:**
+                
+                1. **ImportError: No module named 'save_models' or 'wind_turbine_pm_fuhrlander'**
+                   - Check that `RUL/save_models.py` exists
+                   - Check that `RUL/wind_turbine_pm_fuhrlander.py` exists
+                   - Verify `.venv_pdm` has all dependencies installed
+                   - Ensure the RUL directory structure is intact
+                
+                2. **FileNotFoundError: Model files not found**
+                   - Ensure `RUL/saved_models/` directory exists
+                   - Run training script if models haven't been generated:
+                     ```powershell
+                     & "\.venv_pdm\Scripts\python.exe" RUL/wind_turbine_pm_fuhrlander.py
+                     ```
+                
+                3. **Pickle/joblib errors**
+                   - Models may have been saved with incompatible sklearn
+                   - Retrain models with `.venv_pdm` environment
+                   
+                4. **Path/import errors**
+                   - Verify the RUL directory is in the correct location
+                   - Check file permissions on the RUL directory
+                """)
+            
+            return None
+        
+        # Get temp file path from stdout (last line)
+        stdout_lines = result.stdout.strip().splitlines()
+        temp_file_path = stdout_lines[-1].strip() if stdout_lines else ""
+        
+        if not temp_file_path or not os.path.exists(temp_file_path):
+            st.error("❌ Subprocess succeeded but temp file not found")
+            st.code(f"Stdout: {result.stdout}\nStderr: {result.stderr}", language="text")
+            return None
+        
+        # Load serialized data in main process
+        with open(temp_file_path, 'rb') as f:
+            data = pickle.load(f)
+        
+        # Cleanup temp file
+        try:
+            os.unlink(temp_file_path)
+        except:
+            pass  # Ignore cleanup errors
+        
+        # Verify loaded data structure
+        if not isinstance(data, dict) or 'models' not in data or 'test_data' not in data:
+            st.error("❌ Loaded data has unexpected structure")
+            return None
+        
+        # Check test data validity
+        test_data = data['test_data']
+        if not isinstance(test_data, dict) or 'X_test' not in test_data:
+            st.error("❌ Test data missing required keys (X_test, y_test)")
+            return None
+        
+        n_samples = len(test_data['X_test'])
+        n_features = test_data['X_test'].shape[1] if len(test_data['X_test'].shape) > 1 else 0
+        sklearn_version = data.get('sklearn_version', 'unknown')
+        
+        st.success(f'✅ Models loaded via subprocess with sklearn {sklearn_version}')
+        st.info(f'📊 Loaded {n_samples:,} samples with {n_features} features')
+        
+        return {
+            'models': data['models'],
+            'test_data': test_data
+        }
+        
+    except subprocess.TimeoutExpired:
+        st.error("❌ Model loading timed out (>60 seconds)")
+        st.warning("""**Possible causes:**
+        - Model files are very large
+        - Slow disk I/O
+        - Python environment has issues
+        
+        **Try:**
+        - Restart Streamlit
+        - Check system resources
+        - Verify `.venv_pdm` is not corrupted
+        """)
+        return None
+        
+    except Exception as e:
+        st.error(f"❌ Unexpected error in subprocess model loading: {str(e)}")
+        import traceback
+        with st.expander("🔍 Full Error Trace"):
+            st.code(traceback.format_exc())
+        return None
+
+
+@st.cache_resource
+def load_pdm_models():
+    """
+    Load Fuhrlander FL2500 predictive maintenance models.
+    
+    Loads models directly using the main environment's scikit-learn 1.8.0.
+    Models have been retrained with sklearn 1.8.0 for compatibility.
+    
+    Returns:
+        dict: Dictionary with 'models' and 'test_data'
+    """
+    try:
+        import sys
+        
+        # Add RUL directory to path
+        rul_path = os.path.join(SCRIPT_DIR, 'RUL')
+        if rul_path not in sys.path:
+            sys.path.insert(0, rul_path)
+        
+        with st.spinner('📦 Loading PdM models (sklearn 1.8.0)...'):
+            from save_models import load_all_models, load_test_data
+            
+            models = load_all_models()
+            test_data = load_test_data()
+        
+        # Display version info
+        sklearn_version = models.get('sklearn_version', 'unknown')
+        st.success(f'✅ Models loaded successfully (sklearn {sklearn_version})')
+        
+        return {
+            'models': models,
+            'test_data': test_data
+        }
+        
+    except ImportError as e:
+        st.error(f"❌ Import error: {e}")
+        st.info("💡 Make sure RUL folder contains save_models.py")
+        return None
+        
+    except Exception as e:
+        st.error(f'❌ Failed to load PdM models: {str(e)}')
+        
+        # Check if it's a version mismatch error
+        error_str = str(e).lower()
+        if 'pickle' in error_str or 'joblib' in error_str or 'sklearn' in error_str or 'pyx_unpickle' in error_str:
+            with st.expander("💡 Solution: Retrain Models"):
+                st.markdown("""
+                **This error is due to scikit-learn version mismatch.**
+                
+                The saved models were created with an older sklearn version (1.4.2), 
+                but your current environment has sklearn 1.8.0.
+                
+                **Solution: Retrain models with current sklearn version**
+                ```powershell
+                # Navigate to project directory
+                cd PowerLift
+                
+                # Activate main environment
+                & "\.venv\Scripts\activate"
+                
+                # Retrain models (~10-15 minutes)
+                cd RUL
+                python wind_turbine_pm_fuhrlander.py
+                ```
+                
+                This will regenerate all models compatible with sklearn 1.8.0.
+                The retrained models will have identical performance.
+                """)
+        
+        with st.expander("🔍 Click for detailed error trace"):
+            import traceback
+            st.code(traceback.format_exc())
+        
+        return None
+
+
+def run_pdm_inference(models_dict, n_samples=1000, sample_offset=0):
+    """Run predictive maintenance inference on test data."""
+    import numpy as np
+    import sys
+    rul_path = os.path.join(SCRIPT_DIR, 'RUL')
+    if rul_path not in sys.path:
+        sys.path.insert(0, rul_path)
+    
+    from wind_turbine_pm_fuhrlander import predict_rul
+    
+    models = models_dict['models']
+    test_data = models_dict['test_data']
+    
+    # Extract subset of test data
+    X_test = test_data['X_test']
+    y_test = test_data['y_test']
+    test_df = test_data['test_df']
+    
+    # Apply offset and limit to n_samples
+    end_idx = min(sample_offset + n_samples, len(X_test))
+    X_subset = X_test[sample_offset:end_idx]
+    y_subset = y_test[sample_offset:end_idx]
+    df_subset = test_df.iloc[sample_offset:end_idx]
+    
+    # Run inference
+    autoencoder = models['autoencoder']
+    gmm = models['gmm']
+    binary_clf = models['binary_clf']
+    multi_clf = models['multi_clf']
+    lstm_models = models['lstm_models']
+    failure_threshold = models['failure_threshold']
+    state_order_map = models['state_order_map']
+    
+    # 1. Health Indicator
+    hi = autoencoder.get_health_indicator(X_subset)
+    
+    # 2. Health States
+    raw_states = gmm.predict(hi.reshape(-1, 1))
+    states = np.array([state_order_map[s] for s in raw_states])
+    
+    # 3. Binary fault prediction
+    binary_pred = binary_clf.predict(X_subset)
+    binary_prob = binary_clf.predict_proba(X_subset)
+    
+    # 4. Multi-class fault prediction
+    multi_pred = multi_clf.predict(X_subset)
+    multi_prob = multi_clf.predict_proba(X_subset)
+    
+    # 5. RUL prediction
+    rul = predict_rul(hi, states, lstm_models, failure_threshold, seq_length=24)
+    
+    return {
+        'X': X_subset,
+        'y_true': y_subset,
+        'df': df_subset,
+        'health_indicator': hi,
+        'health_states': states,
+        'binary_predictions': binary_pred,
+        'binary_probabilities': binary_prob,
+        'multi_predictions': multi_pred,
+        'multi_probabilities': multi_prob,
+        'rul_predictions': rul,
+        'failure_threshold': failure_threshold,
+        'feature_names': models['feature_names'],
+        'n_samples': len(X_subset),
+        'sample_offset': sample_offset,
+    }
+
+
+def display_pdm_results(pdm_results, models_dict):
+    """Display PdM inference results in the GUI."""
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import sys
+    
+    rul_path = os.path.join(SCRIPT_DIR, 'RUL')
+    if rul_path not in sys.path:
+        sys.path.insert(0, rul_path)
+    
+    st.markdown('## 🏥 Predictive Maintenance Analysis Results')
+    st.markdown('---')
+    
+    # Summary metrics
+    st.markdown('### 📊 Overall Health Summary')
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        avg_hi = np.nanmean(pdm_results['health_indicator'])
+        st.metric('Average Health Indicator', f'{avg_hi:.4f}')
+        health_status = 'Healthy' if avg_hi < pdm_results['failure_threshold'] else '⚠️ At Risk'
+        st.caption(f'Status: {health_status}')
+    
+    with col2:
+        state_counts = pd.Series(pdm_results['health_states']).value_counts()
+        state_labels = {0: 'Healthy', 1: 'Degrading', 2: 'Critical'}
+        dominant_state = state_counts.idxmax()
+        st.metric('Dominant Health State', state_labels[dominant_state])
+        st.caption(f'Count: {state_counts[dominant_state]}/{len(pdm_results["health_states"])}')
+    
+    with col3:
+        avg_fault_prob = np.nanmean(pdm_results['binary_probabilities'][:, 1])
+        st.metric('Avg Fault Probability', f'{avg_fault_prob:.2%}')
+        st.caption('Binary classifier')
+    
+    with col4:
+        valid_rul = pdm_results['rul_predictions'][~np.isnan(pdm_results['rul_predictions'])]
+        if len(valid_rul) > 0:
+            min_rul = np.min(valid_rul)
+            st.metric('Min RUL (hours)', f'{min_rul:.1f}')
+            st.caption('Time to failure')
+        else:
+            st.metric('Min RUL', 'N/A')
+            st.caption('No valid predictions')
+    
+    st.markdown('---')
+    
+    # Create tabs for different visualizations
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        '📈 Health Indicator Trend',
+        '🎯 State Distribution',
+        '⚠️ Fault Probabilities',
+        '⏱️ RUL Predictions',
+        '🔍 Feature Importance'
+    ])
+    
+    with tab1:
+        st.markdown('#### Health Indicator Over Time')
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Color by health state
+        state_colors = {0: '#2ca02c', 1: '#ff7f0e', 2: '#d62728'}
+        state_labels_map = {0: 'Healthy', 1: 'Degrading', 2: 'Critical'}
+        
+        for state in [0, 1, 2]:
+            mask = pdm_results['health_states'] == state
+            if np.any(mask):
+                indices = np.where(mask)[0]
+                ax.scatter(indices, pdm_results['health_indicator'][mask],
+                          s=20, alpha=0.6, color=state_colors[state],
+                          label=state_labels_map[state])
+        
+        ax.axhline(y=pdm_results['failure_threshold'], color='red',
+                  linestyle='--', linewidth=2,
+                  label=f"Failure Threshold ({pdm_results['failure_threshold']:.4f})")
+        
+        ax.set_xlabel('Sample Index', fontsize=12)
+        ax.set_ylabel('Health Indicator', fontsize=12)
+        ax.set_title('Health Indicator Trend with GMM States', fontsize=14, fontweight='bold')
+        ax.legend(loc='best')
+        ax.grid(True, alpha=0.3)
+        
+        st.pyplot(fig)
+        plt.close(fig)
+        
+        # Statistics
+        st.markdown('**Statistics:**')
+        st.write(f'- Mean HI: {np.nanmean(pdm_results["health_indicator"]):.4f}')
+        st.write(f'- Std HI: {np.nanstd(pdm_results["health_indicator"]):.4f}')
+        st.write(f'- Max HI: {np.nanmax(pdm_results["health_indicator"]):.4f}')
+        st.write(f'- Samples above threshold: {np.sum(pdm_results["health_indicator"] > pdm_results["failure_threshold"])}/{len(pdm_results["health_indicator"])}')
+    
+    with tab2:
+        st.markdown('#### Health State Distribution')
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            # Pie chart
+            fig, ax = plt.subplots(figsize=(8, 8))
+            state_labels_map = {0: 'Healthy', 1: 'Degrading', 2: 'Critical'}
+            state_counts = pd.Series(pdm_results['health_states']).value_counts().sort_index()
+            colors = ['#2ca02c', '#ff7f0e', '#d62728']
+            labels = [state_labels_map[i] for i in state_counts.index]
+            
+            wedges, texts, autotexts = ax.pie(state_counts.values, labels=labels,
+                                               autopct='%1.1f%%', colors=colors,
+                                               startangle=90, textprops={'size': 12})
+            ax.set_title('GMM Health State Distribution', fontsize=14, fontweight='bold')
+            st.pyplot(fig)
+            plt.close(fig)
+        
+        with col2:
+            # Bar chart
+            fig, ax = plt.subplots(figsize=(8, 6))
+            ax.bar(labels, state_counts.values, color=colors, alpha=0.7, edgecolor='black')
+            ax.set_xlabel('Health State', fontsize=12)
+            ax.set_ylabel('Count', fontsize=12)
+            ax.set_title('Health State Counts', fontsize=14, fontweight='bold')
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            for i, v in enumerate(state_counts.values):
+                ax.text(i, v + 10, str(v), ha='center', va='bottom', fontweight='bold')
+            
+            st.pyplot(fig)
+            plt.close(fig)
+    
+    with tab3:
+        st.markdown('#### Fault Probability Analysis')
+        
+        # Binary classifier probabilities
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        
+        # Binary fault probability over time
+        ax1.plot(pdm_results['binary_probabilities'][:, 1],
+                linewidth=1, alpha=0.7, color='orange')
+        ax1.axhline(y=0.5, color='red', linestyle='--', linewidth=2,
+                   label='Decision Threshold (0.5)')
+        ax1.set_xlabel('Sample Index', fontsize=12)
+        ax1.set_ylabel('P(Anomalous)', fontsize=12)
+        ax1.set_title('Binary Fault Probability Over Time', fontsize=14, fontweight='bold')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_ylim([0, 1])
+        
+        # Multi-class probabilities
+        class_labels = ['Healthy', 'Pre-Fault', 'Fault']
+        colors_multi = ['#2ca02c', '#ff7f0e', '#d62728']
+        
+        for i, (label, color) in enumerate(zip(class_labels, colors_multi)):
+            ax2.plot(pdm_results['multi_probabilities'][:, i],
+                    linewidth=1, alpha=0.7, label=label, color=color)
+        
+        ax2.set_xlabel('Sample Index', fontsize=12)
+        ax2.set_ylabel('Probability', fontsize=12)
+        ax2.set_title('Multi-Class Fault Probabilities', fontsize=14, fontweight='bold')
+        ax2.legend(loc='best')
+        ax2.grid(True, alpha=0.3)
+        ax2.set_ylim([0, 1])
+        
+        st.pyplot(fig)
+        plt.close(fig)
+        
+        # Statistics
+        st.markdown('**Binary Classifier Statistics:**')
+        n_anomalous = np.sum(pdm_results['binary_predictions'] == 1)
+        st.write(f'- Samples classified as anomalous: {n_anomalous}/{len(pdm_results["binary_predictions"])} ({n_anomalous/len(pdm_results["binary_predictions"])*100:.1f}%)')
+        st.write(f'- Average P(anomalous): {np.mean(pdm_results["binary_probabilities"][:, 1]):.3f}')
+        
+        st.markdown('**Multi-Class Classifier Statistics:**')
+        for i, label in enumerate(class_labels):
+            count = np.sum(pdm_results['multi_predictions'] == i)
+            st.write(f'- {label}: {count}/{len(pdm_results["multi_predictions"])} ({count/len(pdm_results["multi_predictions"])*100:.1f}%)')
+    
+    with tab4:
+        st.markdown('#### Remaining Useful Life (RUL) Predictions')
+        
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        valid_mask = ~np.isnan(pdm_results['rul_predictions'])
+        valid_indices = np.where(valid_mask)[0]
+        valid_rul = pdm_results['rul_predictions'][valid_mask]
+        
+        if len(valid_rul) > 0:
+            # Color by urgency
+            colors_rul = np.where(valid_rul < 24, 'red',
+                                 np.where(valid_rul < 168, 'orange', 'green'))
+            
+            ax.scatter(valid_indices, valid_rul, c=colors_rul, s=20, alpha=0.6)
+            ax.set_xlabel('Sample Index', fontsize=12)
+            ax.set_ylabel('RUL (hours)', fontsize=12)
+            ax.set_title('Remaining Useful Life Predictions', fontsize=14, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            
+            # Add legend
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='green', label='> 1 week (safe)'),
+                Patch(facecolor='orange', label='1-7 days (warning)'),
+                Patch(facecolor='red', label='< 1 day (critical)')
+            ]
+            ax.legend(handles=legend_elements, loc='best')
+            
+            st.pyplot(fig)
+            plt.close(fig)
+            
+            # Statistics
+            st.markdown('**RUL Statistics:**')
+            st.write(f'- Valid predictions: {len(valid_rul)}/{len(pdm_results["rul_predictions"])}')
+            st.write(f'- Mean RUL: {np.mean(valid_rul):.1f} hours ({np.mean(valid_rul)/24:.1f} days)')
+            st.write(f'- Min RUL: {np.min(valid_rul):.1f} hours')
+            st.write(f'- Max RUL: {np.max(valid_rul):.1f} hours')
+            
+            critical = np.sum(valid_rul < 24)
+            warning = np.sum((valid_rul >= 24) & (valid_rul < 168))
+            safe = np.sum(valid_rul >= 168)
+            st.write(f'- Critical (<24h): {critical}')
+            st.write(f'- Warning (1-7 days): {warning}')
+            st.write(f'- Safe (>7 days): {safe}')
+        else:
+            st.warning('No valid RUL predictions available (requires sufficient sequence length)')
+    
+    with tab5:
+        st.markdown('#### Feature Importance (SHAP Analysis)')
+        
+        try:
+            from shap_explainer import SHAPExplainer
+            
+            # Get a sample for SHAP explanation
+            sample_idx = min(100, len(pdm_results['X']) - 1)
+            X_sample = pdm_results['X'][sample_idx:sample_idx+1]
+            
+            with st.spinner('Computing SHAP values...'):
+                explainer = SHAPExplainer(
+                    binary_clf=models_dict['models']['binary_clf'],
+                    multi_clf=models_dict['models']['multi_clf'],
+                    feature_names=pdm_results['feature_names']
+                )
+                
+                explanation = explainer.explain_single_sample(
+                    X_sample,
+                    sample_id=f'sample_{sample_idx}',
+                    save_plot=False,
+                    verbose=False
+                )
+            
+            st.markdown(f'**Sample {sample_idx} Analysis:**')
+            st.write(explanation['explanation_text'])
+            
+            # Display top features
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown('**Top Features Pushing Towards Fault:**')
+                for feat, shap_val, feat_val in explanation['top_features_pushing_fault'][:10]:
+                    st.write(f'- {feat}: SHAP={shap_val:.4f}, Value={feat_val:.4f}')
+            
+            with col2:
+                st.markdown('**Top Features Pushing Towards Healthy:**')
+                for feat, shap_val, feat_val in explanation['top_features_pushing_healthy'][:10]:
+                    st.write(f'- {feat}: SHAP={shap_val:.4f}, Value={feat_val:.4f}')
+            
+        except Exception as e:
+            st.warning(f'SHAP analysis not available: {str(e)}')
+            st.info('Install SHAP library for detailed feature importance analysis: `pip install shap`')
+    
+    st.markdown('---')
+    st.success('✅ Predictive Maintenance analysis complete!')
+    
+    # Add fault diagnosis section using SHAP
+    st.markdown('---')
+    st.markdown('### 🔍 Fault Diagnosis & Root Cause Analysis')
+    st.markdown('Analyzing critical and degrading turbines using SHAP values...')
+    
+    with st.spinner('Computing SHAP-based diagnosis...'):
+        try:
+            # Get feature data from pdm_results (returned by run_pdm_inference)
+            X_data = pdm_results['X']
+            diagnosis = diagnose_faults_shap(pdm_results, models_dict, X_data, top_n=5)
+            display_fault_diagnosis(diagnosis)
+        except Exception as e:
+            st.error(f'❌ Fault diagnosis failed: {str(e)}')
+            st.info('💡 SHAP analysis requires the shap package. Install with: pip install shap')
+            import traceback
+            with st.expander('🔍 Error Details'):
+                st.code(traceback.format_exc())
+    
+    # Add downloadable report section
+    st.markdown('---')
+    st.markdown('### 📄 Download Analysis Report')
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.markdown('Generate a comprehensive PDF report with analysis results and recommendations.')
+    
+    with col2:
+        if st.button('📥 Generate Report', use_container_width=True):
+            report_content = generate_pdm_report(pdm_results, models_dict)
+            st.download_button(
+                label='Download Report',
+                data=report_content,
+                file_name=f'pdm_analysis_report_{pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")}.md',
+                mime='text/markdown',
+                use_container_width=True
+            )
+    
+    # Add chatbot section
+    st.markdown('---')
+    pdm_chatbot_section(pdm_results, models_dict)
+
+
+# =============================================================================
+# Fault Diagnosis Mapping (Feature -> Root Cause -> Maintenance Action)
+# =============================================================================
+
+FAULT_DIAGNOSIS_MAP = {
+    # Gearbox temperatures
+    'wtrm_avg_TrmTmp_Gbx': {
+        'component': 'Gearbox',
+        'high_threshold': 80.0,
+        'root_cause': 'High gearbox temperature - lubrication degradation or overload',
+        'maintenance_action': '1. Check oil level and quality\n2. Replace oil if contaminated\n3. Check for gear tooth wear\n4. Verify cooling system operation',
+        'urgency': 'HIGH',
+        'cost_estimate': '€5,000-€15,000'
+    },
+    'wtrm_avg_TrmTmp_GbxOil': {
+        'component': 'Gearbox Oil System',
+        'high_threshold': 75.0,
+        'root_cause': 'High oil temperature - cooling system failure or oil degradation',
+        'maintenance_action': '1. Inspect oil cooler\n2. Check oil filter condition\n3. Verify oil circulation pump\n4. Replace oil if oxidized',
+        'urgency': 'HIGH',
+        'cost_estimate': '€3,000-€8,000'
+    },
+    'wtrm_avg_TrmTmp_GbxBrg151': {
+        'component': 'Gearbox Bearing 151',
+        'high_threshold': 70.0,
+        'root_cause': 'High bearing temperature - bearing wear or lubrication failure',
+        'maintenance_action': '1. Perform vibration analysis\n2. Inspect bearing condition (endoscopy)\n3. Check lubrication delivery\n4. Plan bearing replacement',
+        'urgency': 'CRITICAL',
+        'cost_estimate': '€10,000-€30,000'
+    },
+    'wtrm_avg_TrmTmp_GbxBrg152': {
+        'component': 'Gearbox Bearing 152',
+        'high_threshold': 70.0,
+        'root_cause': 'High bearing temperature - bearing wear or lubrication failure',
+        'maintenance_action': '1. Perform vibration analysis\n2. Inspect bearing condition (endoscopy)\n3. Check lubrication delivery\n4. Plan bearing replacement',
+        'urgency': 'CRITICAL',
+        'cost_estimate': '€10,000-€30,000'
+    },
+    'wtrm_avg_TrmTmp_GbxBrg450': {
+        'component': 'Gearbox Bearing 450',
+        'high_threshold': 70.0,
+        'root_cause': 'High bearing temperature - bearing wear or lubrication failure',
+        'maintenance_action': '1. Perform vibration analysis\n2. Inspect bearing condition (endoscopy)\n3. Check lubrication delivery\n4. Plan bearing replacement',
+        'urgency': 'CRITICAL',
+        'cost_estimate': '€10,000-€30,000'
+    },
+    'wtrm_avg_TrmTmp_GnBrgDE': {
+        'component': 'Generator Bearing (Drive End)',
+        'high_threshold': 75.0,
+        'root_cause': 'High generator bearing temperature - bearing degradation',
+        'maintenance_action': '1. Vibration analysis\n2. Oil analysis for metal particles\n3. Check alignment with gearbox\n4. Replace bearing if needed',
+        'urgency': 'HIGH',
+        'cost_estimate': '€8,000-€20,000'
+    },
+    'wtrm_avg_TrmTmp_GnBrgNDE': {
+        'component': 'Generator Bearing (Non-Drive End)',
+        'high_threshold': 75.0,
+        'root_cause': 'High generator bearing temperature - bearing degradation',
+        'maintenance_action': '1. Vibration analysis\n2. Oil analysis for metal particles\n3. Check alignment\n4. Replace bearing if needed',
+        'urgency': 'HIGH',
+        'cost_estimate': '€8,000-€20,000'
+    },
+    'wtrm_avg_Gbx_OilPres': {
+        'component': 'Gearbox Oil Pressure',
+        'low_threshold': 1.5,
+        'root_cause': 'Low oil pressure - pump failure, filter blockage, or oil leak',
+        'maintenance_action': '1. Inspect oil pump operation\n2. Check oil filters (replace if clogged)\n3. Check for oil leaks\n4. Verify pressure sensor calibration',
+        'urgency': 'CRITICAL',
+        'cost_estimate': '€2,000-€10,000'
+    },
+    'wtrm_avg_Brg_OilPres': {
+        'component': 'Main Bearing Oil Pressure',
+        'low_threshold': 1.2,
+        'root_cause': 'Low bearing oil pressure - pump malfunction or leak',
+        'maintenance_action': '1. Check bearing lubrication pump\n2. Inspect oil lines for leaks\n3. Replace filters\n4. Verify oil level',
+        'urgency': 'CRITICAL',
+        'cost_estimate': '€2,000-€8,000'
+    },
+    'wgen_avg_GnTmp_phsA': {
+        'component': 'Generator Windings',
+        'high_threshold': 120.0,
+        'root_cause': 'High generator temperature - electrical overload or cooling failure',
+        'maintenance_action': '1. Check generator cooling system\n2. Inspect stator windings for damage\n3. Verify electrical load balance\n4. Check for insulation degradation',
+        'urgency': 'HIGH',
+        'cost_estimate': '€15,000-€50,000'
+    },
+    'wgen_sdv_Spd': {
+        'component': 'Generator Speed Variability',
+        'high_threshold': 10.0,
+        'root_cause': 'High speed variability - mechanical imbalance or blade issues',
+        'maintenance_action': '1. Inspect rotor balance\n2. Check blade pitch actuators\n3. Verify coupling condition\n4. Inspect gearbox teeth for wear',
+        'urgency': 'MEDIUM',
+        'cost_estimate': '€5,000-€20,000'
+    },
+    'thermal_stress_idx': {
+        'component': 'Overall Thermal Stress',
+        'high_threshold': 0.75,
+        'root_cause': 'High thermal stress - system overheating',
+        'maintenance_action': '1. Comprehensive thermal inspection\n2. Check all cooling systems\n3. Reduce load temporarily\n4. Plan major maintenance',
+        'urgency': 'HIGH',
+        'cost_estimate': '€10,000-€40,000'
+    },
+    'bearing_stress_idx': {
+        'component': 'Overall Bearing Stress',
+        'high_threshold': 0.70,
+        'root_cause': 'High bearing stress - multiple bearing degradation',
+        'maintenance_action': '1. Prioritize bearing inspections\n2. Comprehensive vibration survey\n3. Oil analysis for all bearings\n4. Plan coordinated bearing replacement',
+        'urgency': 'CRITICAL',
+        'cost_estimate': '€25,000-€80,000'
+    },
+    'power_efficiency': {
+        'component': 'Power Efficiency',
+        'low_threshold': 0.25,
+        'root_cause': 'Low power efficiency - mechanical losses or grid issues',
+        'maintenance_action': '1. Check gearbox efficiency\n2. Inspect blade pitch system\n3. Verify generator performance\n4. Check grid connection quality',
+        'urgency': 'MEDIUM',
+        'cost_estimate': '€3,000-€15,000'
+    },
+    'bearing_temp_spread': {
+        'component': 'Bearing Temperature Balance',
+        'high_threshold': 15.0,
+        'root_cause': 'Large bearing temp spread - uneven load distribution or alignment issue',
+        'maintenance_action': '1. Check shaft alignment\n2. Inspect bearing mounting\n3. Verify load distribution\n4. Check for structural issues',
+        'urgency': 'MEDIUM',
+        'cost_estimate': '€5,000-€25,000'
+    },
+}
+
+
+def diagnose_faults_shap(pdm_results, models_dict, X_data, top_n=5):
+    """
+    Fault diagnosis agent using SHAP values for critical and degrading turbines.
+    Returns root cause analysis and maintenance recommendations without requiring LLM.
+    
+    Args:
+        pdm_results: Dictionary with analysis results including health_states
+        models_dict: Dictionary with trained models (binary_clf, multi_clf)
+        X_data: Feature matrix (N_samples, 27 features)
+        top_n: Number of top contributing features to analyze
+    
+    Returns:
+        dict with diagnosis for critical and degrading turbines
+    """
+    import numpy as np
+    import pandas as pd
+    import sys
+    import os
+    
+    # Add RUL directory to path if not already there
+    rul_dir = os.path.join(os.path.dirname(__file__), 'RUL')
+    if rul_dir not in sys.path:
+        sys.path.insert(0, rul_dir)
+    
+    try:
+        from shap_explainer import SHAPExplainer
+    except ImportError:
+        return {
+            'error': 'SHAP explainer not available',
+            'critical_diagnosis': [],
+            'degrading_diagnosis': []
+        }
+    
+    # Feature names from Fuhrlander FL2500
+    RAW_FEATURES = [
+        'wtrm_avg_TrmTmp_Gbx', 'wtrm_avg_TrmTmp_GbxOil',
+        'wtrm_avg_TrmTmp_GbxBrg151', 'wtrm_avg_TrmTmp_GbxBrg152',
+        'wtrm_avg_TrmTmp_GbxBrg450', 'wtrm_avg_TrmTmp_GnBrgDE',
+        'wtrm_avg_TrmTmp_GnBrgNDE', 'wtrm_avg_Gbx_OilPres',
+        'wtrm_avg_Brg_OilPres', 'wgen_avg_GnTmp_phsA',
+        'wgen_avg_Spd', 'wnac_avg_WSpd1', 'wnac_avg_NacTmp',
+        'wgdc_avg_TriGri_PwrAt', 'wgdc_avg_TriGri_A',
+        'wtrm_sdv_TrmTmp_Gbx', 'wtrm_sdv_TrmTmp_GbxOil', 'wgen_sdv_Spd'
+    ]
+    ENGINEERED_FEATURES = [
+        'thermal_stress_idx', 'bearing_stress_idx', 'power_efficiency',
+        'gbx_temp_trend', 'oil_pressure_ratio', 'bearing_temp_spread',
+        'gen_thermal_load', 'oil_temp_trend', 'variability_trend'
+    ]
+    ALL_FEATURES = RAW_FEATURES + ENGINEERED_FEATURES
+    
+    # Identify critical and degrading samples
+    health_states = pdm_results['health_states']
+    critical_mask = health_states == 2  # Critical
+    degrading_mask = health_states == 1  # Degrading
+    
+    critical_indices = np.where(critical_mask)[0]
+    degrading_indices = np.where(degrading_mask)[0]
+    
+    diagnosis = {
+        'critical_diagnosis': [],
+        'degrading_diagnosis': [],
+        'critical_count': len(critical_indices),
+        'degrading_count': len(degrading_indices)
+    }
+    
+    if len(critical_indices) == 0 and len(degrading_indices) == 0:
+        return diagnosis
+    
+    # Extract models from models_dict structure
+    # models_dict has structure: {'models': {...}, 'test_data': {...}}
+    models = models_dict.get('models', models_dict)  # Fallback if already unwrapped
+    
+    # Initialize SHAP explainer
+    try:
+        explainer = SHAPExplainer(
+            binary_clf=models['binary_clf'],
+            multi_clf=models['multi_clf'],
+            feature_names=ALL_FEATURES,
+            output_dir=rul_dir
+        )
+    except Exception as e:
+        diagnosis['error'] = f"Failed to initialize SHAP explainer: {str(e)}"
+        return diagnosis
+    
+    # Analyze CRITICAL samples (take up to 100 random samples for speed)
+    if len(critical_indices) > 0:
+        sample_size = min(100, len(critical_indices))
+        sampled_critical = np.random.choice(critical_indices, sample_size, replace=False)
+        
+        X_critical = X_data[sampled_critical]
+        
+        # Compute SHAP values for critical samples
+        try:
+            shap_result = explainer.compute_shap_values(X_critical, max_samples=sample_size)
+            binary_shap = shap_result['binary_shap']
+            
+            if isinstance(binary_shap, list):
+                binary_shap = binary_shap[1]  # Class 1 (anomalous)
+            
+            # Average SHAP across all critical samples
+            mean_shap = np.mean(np.abs(binary_shap), axis=0)
+            top_features_idx = np.argsort(mean_shap)[::-1][:top_n]
+            
+            for rank, feat_idx in enumerate(top_features_idx, 1):
+                feat_name = ALL_FEATURES[feat_idx]
+                shap_importance = mean_shap[feat_idx]
+                avg_feature_value = np.mean(X_critical[:, feat_idx])
+                
+                # Get diagnosis if feature is known
+                if feat_name in FAULT_DIAGNOSIS_MAP:
+                    diag = FAULT_DIAGNOSIS_MAP[feat_name].copy()
+                    diag['rank'] = rank
+                    diag['feature_name'] = feat_name
+                    diag['shap_importance'] = float(shap_importance)
+                    diag['avg_value'] = float(avg_feature_value)
+                    
+                    # Check if value exceeds threshold
+                    if 'high_threshold' in diag and avg_feature_value > diag['high_threshold']:
+                        diag['threshold_exceeded'] = True
+                        diag['threshold_type'] = 'HIGH'
+                    elif 'low_threshold' in diag and avg_feature_value < diag['low_threshold']:
+                        diag['threshold_exceeded'] = True
+                        diag['threshold_type'] = 'LOW'
+                    else:
+                        diag['threshold_exceeded'] = False
+                    
+                    diagnosis['critical_diagnosis'].append(diag)
+        except Exception as e:
+            diagnosis['critical_error'] = f"SHAP analysis failed for critical samples: {str(e)}"
+    
+    # Analyze DEGRADING samples
+    if len(degrading_indices) > 0:
+        sample_size = min(100, len(degrading_indices))
+        sampled_degrading = np.random.choice(degrading_indices, sample_size, replace=False)
+        
+        X_degrading = X_data[sampled_degrading]
+        
+        try:
+            shap_result = explainer.compute_shap_values(X_degrading, max_samples=sample_size)
+            binary_shap = shap_result['binary_shap']
+            
+            if isinstance(binary_shap, list):
+                binary_shap = binary_shap[1]
+            
+            mean_shap = np.mean(np.abs(binary_shap), axis=0)
+            top_features_idx = np.argsort(mean_shap)[::-1][:top_n]
+            
+            for rank, feat_idx in enumerate(top_features_idx, 1):
+                feat_name = ALL_FEATURES[feat_idx]
+                shap_importance = mean_shap[feat_idx]
+                avg_feature_value = np.mean(X_degrading[:, feat_idx])
+                
+                if feat_name in FAULT_DIAGNOSIS_MAP:
+                    diag = FAULT_DIAGNOSIS_MAP[feat_name].copy()
+                    diag['rank'] = rank
+                    diag['feature_name'] = feat_name
+                    diag['shap_importance'] = float(shap_importance)
+                    diag['avg_value'] = float(avg_feature_value)
+                    
+                    if 'high_threshold' in diag and avg_feature_value > diag['high_threshold']:
+                        diag['threshold_exceeded'] = True
+                        diag['threshold_type'] = 'HIGH'
+                    elif 'low_threshold' in diag and avg_feature_value < diag['low_threshold']:
+                        diag['threshold_exceeded'] = True
+                        diag['threshold_type'] = 'LOW'
+                    else:
+                        diag['threshold_exceeded'] = False
+                    
+                    diagnosis['degrading_diagnosis'].append(diag)
+        except Exception as e:
+            diagnosis['degrading_error'] = f"SHAP analysis failed for degrading samples: {str(e)}"
+    
+    return diagnosis
+
+
+def generate_pdm_report(pdm_results, models_dict):
+    """
+    Generate a downloadable Markdown report with PdM analysis results and recommendations.
+    """
+    import numpy as np
+    import pandas as pd
+    from datetime import datetime
+    
+    # Extract key metrics
+    avg_hi = np.nanmean(pdm_results['health_indicator'])
+    failure_threshold = pdm_results['failure_threshold']
+    state_counts = pd.Series(pdm_results['health_states']).value_counts()
+    state_labels = {0: 'Healthy', 1: 'Degrading', 2: 'Critical'}
+    avg_fault_prob = np.nanmean(pdm_results['binary_probabilities'][:, 1])
+    valid_rul = pdm_results['rul_predictions'][~np.isnan(pdm_results['rul_predictions'])]
+    
+    report = f"""# Predictive Maintenance Analysis Report
+**Fuhrlander FL2500 Wind Turbine**  
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+---
+
+## Executive Summary
+
+This report presents the predictive maintenance analysis for the Fuhrlander FL2500 wind turbine based on {pdm_results['n_samples']} SCADA data samples.
+
+### Overall Health Assessment
+
+- **Average Health Indicator:** {avg_hi:.4f}
+- **Failure Threshold:** {failure_threshold:.4f}
+- **Health Status:** {'⚠️ AT RISK - Immediate attention required' if avg_hi >= failure_threshold else '✅ HEALTHY - Normal operation'}
+- **Average Fault Probability:** {avg_fault_prob:.2%}
+
+### Health State Distribution
+
+"""
+    
+    for state_id in [0, 1, 2]:
+        count = state_counts.get(state_id, 0)
+        percentage = (count / pdm_results['n_samples']) * 100
+        report += f"- **{state_labels[state_id]}:** {count} samples ({percentage:.1f}%)\n"
+    
+    report += "\n---\n\n## Detailed Analysis\n\n### 1. Health Indicator Analysis\n\n"
+    
+    report += f"""The Health Indicator (HI) is computed using an autoencoder neural network that measures reconstruction error:
+
+- **Mean HI:** {np.nanmean(pdm_results['health_indicator']):.4f}
+- **Std Deviation:** {np.nanstd(pdm_results['health_indicator']):.4f}
+- **Maximum HI:** {np.nanmax(pdm_results['health_indicator']):.4f}
+- **Minimum HI:** {np.nanmin(pdm_results['health_indicator']):.4f}
+- **Samples Above Threshold:** {np.sum(pdm_results['health_indicator'] > failure_threshold)} / {len(pdm_results['health_indicator'])} ({np.sum(pdm_results['health_indicator'] > failure_threshold)/len(pdm_results['health_indicator'])*100:.1f}%)
+
+**Interpretation:** Values below {failure_threshold:.4f} indicate normal operation. Higher values suggest anomalous behavior requiring investigation.
+
+### 2. Fault Probability Assessment\n
+#### Binary Classification (Healthy vs Anomalous):
+"""
+    
+    n_anomalous = np.sum(pdm_results['binary_predictions'] == 1)
+    report += f"""- **Anomalous Samples:** {n_anomalous} / {len(pdm_results['binary_predictions'])} ({n_anomalous/len(pdm_results['binary_predictions'])*100:.1f}%)
+- **Average P(Anomalous):** {np.mean(pdm_results['binary_probabilities'][:, 1]):.3f}
+
+#### Multi-Class Classification:
+
+"""
+    
+    class_labels = ['Healthy', 'Pre-Fault', 'Fault']
+    for i, label in enumerate(class_labels):
+        count = np.sum(pdm_results['multi_predictions'] == i)
+        percentage = (count / len(pdm_results['multi_predictions'])) * 100
+        report += f"- **{label}:** {count} samples ({percentage:.1f}%)\n"
+    
+    report += "\n### 3. Remaining Useful Life (RUL) Predictions\n\n"
+    
+    if len(valid_rul) > 0:
+        min_rul = np.min(valid_rul)
+        mean_rul = np.mean(valid_rul)
+        critical = np.sum(valid_rul < 24)
+        warning = np.sum((valid_rul >= 24) & (valid_rul < 168))
+        safe = np.sum(valid_rul >= 168)
+        
+        report += f"""- **Valid Predictions:** {len(valid_rul)} / {len(pdm_results['rul_predictions'])}
+- **Mean RUL:** {mean_rul:.1f} hours ({mean_rul/24:.1f} days)
+- **Minimum RUL:** {min_rul:.1f} hours
+- **Maximum RUL:** {np.max(valid_rul):.1f} hours
+
+#### RUL Distribution by Urgency:
+
+- **Critical (<24 hours):** {critical} samples
+- **Warning (1-7 days):** {warning} samples
+- **Safe (>7 days):** {safe} samples
+
+"""
+    else:
+        report += "No valid RUL predictions available (requires sufficient sequence length).\n\n"
+    
+    report += """---
+
+## Recommendations
+
+### Immediate Actions
+
+"""
+    
+    # Generate recommendations based on analysis
+    recommendations = []
+    
+    if avg_hi >= failure_threshold:
+        recommendations.append("🔴 **URGENT:** Average Health Indicator exceeds failure threshold. Schedule immediate inspection of critical components (gearbox, bearings, generator).")
+    
+    if avg_fault_prob > 0.5:
+        recommendations.append("🔴 **URGENT:** High fault probability detected. Perform comprehensive diagnostic check within 24 hours.")
+    
+    if len(valid_rul) > 0 and np.min(valid_rul) < 24:
+        recommendations.append(f"🔴 **CRITICAL:** Minimum RUL is {np.min(valid_rul):.1f} hours. Component failure imminent - plan immediate maintenance.")
+    
+    critical_state_pct = (state_counts.get(2, 0) / pdm_results['n_samples']) * 100
+    if critical_state_pct > 10:
+        recommendations.append(f"🟠 **HIGH PRIORITY:** {critical_state_pct:.1f}% of samples in Critical health state. Investigate root cause.")
+    
+    if len(valid_rul) > 0:
+        warning_samples = np.sum((valid_rul >= 24) & (valid_rul < 168))
+        if warning_samples > 0:
+            recommendations.append(f"🟡 **MEDIUM PRIORITY:** {warning_samples} samples show RUL between 1-7 days. Plan preventive maintenance within this window.")
+    
+    if avg_hi < failure_threshold and avg_fault_prob < 0.3:
+        recommendations.append("✅ **NORMAL OPERATION:** Turbine appears healthy. Continue routine monitoring schedule.")
+    else:
+        recommendations.append("🟡 **MONITORING:** Increase monitoring frequency to detect early signs of degradation.")
+    
+    for i, rec in enumerate(recommendations, 1):
+        report += f"{i}. {rec}\n\n"
+    
+    report += """### Preventive Measures
+
+1. **Lubrication System:** Verify gearbox and bearing oil levels and quality
+2. **Temperature Monitoring:** Check for abnormal temperature trends in transmission components
+3. **Vibration Analysis:** Conduct vibration measurements on critical bearings
+4. **Oil Analysis:** Perform oil contamination and wear particle analysis
+5. **Generator Inspection:** Check generator windings and cooling system
+
+### Long-term Strategy
+
+1. **Predictive Maintenance Schedule:** Implement data-driven maintenance intervals based on actual health indicators
+2. **Component Tracking:** Maintain detailed logs of component health metrics over time
+3. **Failure Pattern Analysis:** Correlate failures with operating conditions to improve predictions
+4. **Spare Parts Planning:** Ensure availability of critical components based on RUL predictions
+5. **Training:** Ensure maintenance staff understand health indicator interpretation
+
+---
+
+## Technical Details
+
+### ML Models Used
+
+1. **Autoencoder:** Custom neural network (27→64→32→8→32→64→27) for Health Indicator extraction
+2. **Gaussian Mixture Model (GMM):** 3-component clustering for health state classification
+3. **Gradient Boosting Classifier:** Binary fault prediction (200 trees, depth 5)
+4. **Random Forest Classifier:** Multi-class fault prediction (300 trees, depth 10)
+5. **LSTM Networks:** State-specific RUL prediction (sequence length: 24 hours)
+
+### Input Features (27 total)
+
+**Transmission System (9 features):**
+- Gearbox temperature, oil temperature, bearing temperatures (3 bearings)
+- Gearbox oil pressure, main bearing oil pressure
+- Temperature and oil variability indicators
+
+**Generator System (3 features):**
+- Generator winding temperature, generator speed, speed variability
+
+**Environmental (2 features):**
+- Wind speed, nacelle temperature
+
+**Power System (2 features):**
+- Active power output, grid current
+
+**Engineered Features (9 features):**
+- Thermal stress index, bearing stress index, power efficiency
+- Temperature trends, oil pressure ratio, bearing temperature spread
+- Generator thermal load, oil temperature trend, variability trend
+
+### Model Performance
+
+- **Accuracy:** 75.2%
+- **F1 Score:** 0.746 (weighted average)
+- **Training Data:** 53,810 samples from turbines 80, 81, 82
+- **Test Data:** 35,411 samples from turbines 83, 84
+
+---
+
+## Conclusion
+
+"""
+    
+    if avg_hi >= failure_threshold or avg_fault_prob > 0.5:
+        report += f"""The analysis indicates **elevated risk** requiring immediate attention. With an average health indicator of {avg_hi:.4f} (threshold: {failure_threshold:.4f}) and fault probability of {avg_fault_prob:.2%}, proactive maintenance is strongly recommended to prevent unplanned downtime.
+
+Estimated cost of unplanned failure: €500,000 - €2,000,000  
+Estimated cost of planned maintenance: €50,000 - €150,000
+
+**Recommendation:** Schedule maintenance within the next 24-72 hours to mitigate failure risk.
+"""
+    else:
+        report += f"""The analysis indicates **normal operation** with an average health indicator of {avg_hi:.4f} (below threshold: {failure_threshold:.4f}) and low fault probability of {avg_fault_prob:.2%}. Continue routine monitoring and preventive maintenance schedule.
+
+**Recommendation:** Maintain current monitoring frequency and schedule next inspection per standard maintenance plan.
+"""
+    
+    report += """\n---
+
+## Appendix: Methodology
+
+### Data Collection
+- **Frequency:** Hourly aggregated from 5-minute SCADA data
+- **Features:** 18 raw SCADA features + 9 engineered features
+- **Quality:** Missing values imputed, outliers handled via robust scaling
+
+### ML Pipeline
+1. **Feature Engineering:** Rolling statistics, thermal indices, efficiency metrics
+2. **Health Indicator:** Autoencoder reconstruction error normalized to [0, 1] range
+3. **State Classification:** GMM with 3 components for Healthy/Degrading/Critical states
+4. **Fault Prediction:** Ensemble methods (Gradient Boosting + Random Forest)
+5. **RUL Forecasting:** State-specific LSTM models with 24-hour lookback
+
+### Model Training
+- **Framework:** scikit-learn 1.8.0 + custom numpy implementations
+- **Validation:** 5-fold cross-validation on training set
+- **Hyperparameters:** Optimized via grid search
+- **Retraining Schedule:** Quarterly or when new failure data becomes available
+
+---
+
+*This report was generated automatically by the Wind Turbine Predictive Maintenance System.*  
+*For questions or concerns, contact: maintenance@windfarm.com*
+"""
+    
+    return report
+
+
+def display_fault_diagnosis(diagnosis):
+    """
+    Display fault diagnosis results from SHAP analysis.
+    """
+    import pandas as pd
+    
+    if 'error' in diagnosis:
+        st.error(f"❌ {diagnosis['error']}")
+        return
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric('Critical Samples', diagnosis['critical_count'], 
+                  delta='High Priority' if diagnosis['critical_count'] > 0 else None,
+                  delta_color='inverse')
+    
+    with col2:
+        st.metric('Degrading Samples', diagnosis['degrading_count'],
+                  delta='Monitor Closely' if diagnosis['degrading_count'] > 0 else None,
+                  delta_color='normal')
+    
+    # Display Critical turbines diagnosis
+    if diagnosis['critical_diagnosis']:
+        st.markdown('#### 🔴 Critical Turbines - Root Cause Analysis')
+        st.markdown(f"Analysis based on {diagnosis['critical_count']} critical samples (GMM State = 2)")
+        
+        for diag in diagnosis['critical_diagnosis']:
+            urgency_icon = '🔴' if diag['urgency'] == 'CRITICAL' else '🟠'
+            threshold_msg = ''
+            if diag.get('threshold_exceeded', False):
+                threshold_msg = f" ⚠️ **THRESHOLD EXCEEDED** ({diag['threshold_type']})"
+            
+            with st.expander(
+                f"{urgency_icon} Rank {diag['rank']}: {diag['component']} - {diag['urgency']} Urgency{' ⚠️' if diag.get('threshold_exceeded') else ''}",
+                expanded=(diag['rank'] <= 2)
+            ):
+                col_a, col_b = st.columns([2, 1])
+                
+                with col_a:
+                    st.markdown(f"**Feature:** `{diag['feature_name']}`")
+                    st.markdown(f"**SHAP Importance:** {diag['shap_importance']:.4f}")
+                    st.markdown(f"**Average Value:** {diag['avg_value']:.2f}{threshold_msg}")
+                
+                with col_b:
+                    st.markdown(f"**Urgency:** {diag['urgency']}")
+                    st.markdown(f"**Est. Cost:** {diag['cost_estimate']}")
+                
+                st.markdown(f"**Root Cause:**")
+                st.info(diag['root_cause'])
+                
+                st.markdown(f"**Recommended Maintenance Actions:**")
+                st.success(diag['maintenance_action'])
+        
+        # Summary of critical actions
+        st.markdown('---')
+        st.markdown('##### 🔧 Immediate Action Summary for Critical Turbines')
+        urgent_items = [d for d in diagnosis['critical_diagnosis'] if d['urgency'] in ['CRITICAL', 'HIGH']]
+        if urgent_items:
+            for i, item in enumerate(urgent_items[:3], 1):
+                st.markdown(f"{i}. **{item['component']}**: {item['root_cause'].split(' - ')[1] if ' - ' in item['root_cause'] else item['root_cause']}")
+    elif diagnosis['critical_count'] > 0:
+        st.info('No specific fault diagnosis available for critical samples. Continue monitoring.')
+    
+    # Display Degrading turbines diagnosis
+    if diagnosis['degrading_diagnosis']:
+        st.markdown('#### 🟡 Degrading Turbines - Early Warning Analysis')
+        st.markdown(f"Analysis based on {diagnosis['degrading_count']} degrading samples (GMM State = 1)")
+        
+        for diag in diagnosis['degrading_diagnosis']:
+            urgency_icon = '🟠' if diag['urgency'] == 'HIGH' else '🟡'
+            threshold_msg = ''
+            if diag.get('threshold_exceeded', False):
+                threshold_msg = f" ⚠️ **THRESHOLD EXCEEDED** ({diag['threshold_type']})"
+            
+            with st.expander(
+                f"{urgency_icon} Rank {diag['rank']}: {diag['component']} - {diag['urgency']} Urgency{' ⚠️' if diag.get('threshold_exceeded') else ''}",
+                expanded=(diag['rank'] == 1)
+            ):
+                col_a, col_b = st.columns([2, 1])
+                
+                with col_a:
+                    st.markdown(f"**Feature:** `{diag['feature_name']}`")
+                    st.markdown(f"**SHAP Importance:** {diag['shap_importance']:.4f}")
+                    st.markdown(f"**Average Value:** {diag['avg_value']:.2f}{threshold_msg}")
+                
+                with col_b:
+                    st.markdown(f"**Urgency:** {diag['urgency']}")
+                    st.markdown(f"**Est. Cost:** {diag['cost_estimate']}")
+                
+                st.markdown(f"**Root Cause:**")
+                st.info(diag['root_cause'])
+                
+                st.markdown(f"**Preventive Actions:**")
+                st.success(diag['maintenance_action'])
+        
+        # Summary of preventive actions
+        st.markdown('---')
+        st.markdown('##### 🛠️ Preventive Maintenance Plan for Degrading Turbines')
+        preventive_items = [d for d in diagnosis['degrading_diagnosis'] if d['urgency'] in ['HIGH', 'MEDIUM']]
+        if preventive_items:
+            for i, item in enumerate(preventive_items[:3], 1):
+                st.markdown(f"{i}. **{item['component']}**: Schedule inspection in next maintenance window")
+    elif diagnosis['degrading_count'] > 0:
+        st.info('No specific fault diagnosis available for degrading samples. Maintain regular monitoring schedule.')
+    
+    # No faults found
+    if not diagnosis['critical_diagnosis'] and not diagnosis['degrading_diagnosis']:
+        if diagnosis['critical_count'] == 0 and diagnosis['degrading_count'] == 0:
+            st.success('✅ All turbines are in healthy state. Continue routine monitoring.')
+
+
+def pdm_chatbot_section(pdm_results, models_dict):
+    """
+    Interactive chatbot for PdM analysis queries using LLM.
+    """
+    import numpy as np
+    
+    st.markdown('### 💬 Analysis Q&A Chatbot')
+    st.markdown('Ask questions about the analysis methods, results, or get recommendations.')
+    
+    # LLM selection in sidebar
+    col1, col2 = st.columns([4, 1])
+    
+    with col2:
+        with st.expander('⚙️ LLM Settings'):
+            llm_provider = st.selectbox(
+                'Provider',
+                ['NTNU', 'OpenAI', 'Ollama', 'Google', 'Anthropic'],
+                key='pdm_llm_provider',
+                help='Select LLM provider for chatbot'
+            )
+            
+            if llm_provider == "NTNU":
+                models = [
+                    'moonshotai/Kimi-K2.5',
+                    'Qwen/QwQ-32B-Preview',
+                    'deepseek-ai/DeepSeek-R1',
+                    'meta-llama/Llama-3.3-70B-Instruct-Turbo'
+                ]
+            elif llm_provider == "OpenAI":
+                models = ['gpt-4', 'gpt-4-turbo', 'gpt-3.5-turbo']
+            elif llm_provider == "Ollama":
+                models = ['llama2', 'mistral', 'codellama']
+            elif llm_provider == "Google":
+                models = ['gemini-pro', 'gemini-ultra']
+            else:
+                models = ['claude-3-opus', 'claude-3-sonnet', 'claude-2']
+            
+            selected_model = st.selectbox(
+                'Model',
+                models,
+                key='pdm_selected_model',
+                help=f'Select {llm_provider} model'
+            )
+    
+    # Suggested questions
+    with col1:
+        st.markdown('**Suggested Questions:**')
+        
+        suggested_questions = [
+            'What do the health indicator values mean?',
+            'Why is my turbine classified as "Degrading"?',
+            'How accurate is the RUL prediction?',
+            'What maintenance actions should I take first?',
+            'Explain the difference between binary and multi-class predictions',
+            'What causes high health indicator values?',
+            'How often should I retrain the ML models?',
+            'What are the most important features for fault prediction?'
+        ]
+        
+        # Display as buttons
+        cols = st.columns(4)
+        for i, question in enumerate(suggested_questions[:8]):
+            with cols[i % 4]:
+                if st.button(question[:40] + '...', key=f'pdm_q_{i}', use_container_width=True):
+                    st.session_state.pdm_chat_input = question
+    
+    # Chat input
+    if 'pdm_chat_history' not in st.session_state:
+        st.session_state.pdm_chat_history = []
+    
+    user_question = st.text_input(
+        'Your question:',
+        value=st.session_state.get('pdm_chat_input', ''),
+        placeholder='Ask anything about the analysis...',
+        key='pdm_chat_input_field'
+    )
+    
+    if st.button('🚀 Ask', key='pdm_ask_btn'):
+        if user_question:
+            with st.spinner(f'Consulting {llm_provider} {selected_model}...'):
+                # Prepare context for LLM
+                avg_hi = np.nanmean(pdm_results['health_indicator'])
+                failure_threshold = pdm_results['failure_threshold']
+                avg_fault_prob = np.nanmean(pdm_results['binary_probabilities'][:, 1])
+                valid_rul = pdm_results['rul_predictions'][~np.isnan(pdm_results['rul_predictions'])]
+                
+                state_counts = {}
+                for state in [0, 1, 2]:
+                    state_counts[state] = np.sum(pdm_results['health_states'] == state)
+                
+                min_rul_str = f"{np.min(valid_rul):.1f} hours" if len(valid_rul) > 0 else 'N/A'
+                
+                context = f"""Predictive Maintenance Analysis Context:
+- Average Health Indicator: {avg_hi:.4f} (threshold: {failure_threshold:.4f})
+- Average Fault Probability: {avg_fault_prob:.2%}
+- Health State Distribution: Healthy={state_counts[0]}, Degrading={state_counts[1]}, Critical={state_counts[2]}
+- Valid RUL predictions: {len(valid_rul) if len(valid_rul) > 0 else 0}
+- Min RUL: {min_rul_str}
+- Turbine Type: Fuhrlander FL2500 (2.5MW)
+- Analysis Samples: {pdm_results['n_samples']}
+
+ML Models:
+1. Autoencoder (27→8→27) for Health Indicator extraction
+2. Gaussian Mixture Model (3 components) for health state classification
+3. Gradient Boosting Classifier (200 trees) for binary fault prediction
+4. Random Forest Classifier (300 trees) for multi-class prediction
+5. LSTM networks for RUL prediction (24-hour sequences)
+"""
+                
+                system_message = f"""You are an expert wind turbine predictive maintenance specialist with deep knowledge of:
+- Machine learning models for anomaly detection and fault prediction
+- Wind turbine SCADA data analysis
+- Fuhrlander FL2500 turbine specifications and failure modes
+- Maintenance strategies and cost-benefit analysis
+
+Provide clear, actionable answers based on the analysis context. Be specific about:
+- Technical explanations of ML model outputs
+- Interpretation of health indicators and probabilities
+- Maintenance recommendations with rationale
+- Industry best practices
+
+Use technical terminology appropriately but explain complex concepts clearly."""
+                
+                prompt = f"{context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer:"
+                
+                try:
+                    # Get API configuration
+                    if llm_provider == "NTNU":
+                        api_base = "https://llm.hpc.ntnu.no/v1"
+                        api_key = "sk-48COknyy7BlFg8vbN1ywgg"
+                    elif llm_provider == "OpenAI":
+                        api_base = "https://api.openai.com/v1"
+                        api_key = os.getenv("OPENAI_API_KEY", "your-openai-key")
+                    elif llm_provider == "Ollama":
+                        api_base = "http://localhost:11434/v1"
+                        api_key = "ollama"
+                    elif llm_provider == "Google":
+                        api_base = "https://generativelanguage.googleapis.com/v1beta"
+                        api_key = os.getenv("GOOGLE_API_KEY", "your-google-key")
+                    else:  # Anthropic
+                        api_base = "https://api.anthropic.com/v1"
+                        api_key = os.getenv("ANTHROPIC_API_KEY", "your-anthropic-key")
+                    
+                    # Query LLM
+                    response = query_local_llm(
+                        api_key=api_key,
+                        api_base=api_base,
+                        model_name=selected_model,
+                        prompt=prompt,
+                        system_message=system_message,
+                        temperature=0.7,
+                        max_tokens=1000,
+                        timeout=30.0
+                    )
+                    
+                    # Add to chat history
+                    st.session_state.pdm_chat_history.append({
+                        'question': user_question,
+                        'answer': response,
+                        'provider': llm_provider,
+                        'model': selected_model
+                    })
+                    
+                    st.session_state.pdm_chat_input = ''
+                    
+                except Exception as e:
+                    st.error(f"Error querying LLM: {str(e)}")
+                    st.info("Check your API configuration and network connection.")
+    
+    # Display chat history
+    if st.session_state.pdm_chat_history:
+        st.markdown('---')
+        st.markdown('**Chat History:**')
+        
+        for i, chat in enumerate(reversed(st.session_state.pdm_chat_history[-5:])):
+            with st.expander(f"Q: {chat['question'][:80]}...", expanded=(i==0)):
+                st.markdown(f"**Question:** {chat['question']}")
+                st.markdown(f"**Answer** ({chat['provider']} - {chat['model']}):")
+                st.markdown(chat['answer'])
+        
+        if st.button('🗑️ Clear Chat History'):
+            st.session_state.pdm_chat_history = []
+            st.rerun()
 
 
 # =============================================================================
@@ -2422,269 +3946,512 @@ def main():
     
     # Sidebar for inputs
     with st.sidebar:
-        st.header("🤖 LLM Configuration (Agent 2B)")
-        st.markdown("Configure the AI model for turbine analysis:")
-        
-        # LLM Provider Selection
-        llm_provider = st.selectbox(
-            "LLM Provider",
-            options=["NTNU", "OpenAI", "Ollama", "Google", "Anthropic"],
-            index=0,  # Default to NTNU
-            help="Select the AI service provider"
+        # MODE SELECTOR - at the top
+        st.header("🎯 Application Mode")
+        app_mode = st.radio(
+            "Select analysis mode:",
+            options=["Wind Farm Analysis", "Predictive Maintenance"],
+            index=0 if st.session_state.app_mode == "Wind Farm Analysis" else 1,
+            help="Choose between multi-agent wind farm analysis or predictive maintenance inference"
         )
         
-        # Model Selection based on provider
-        if llm_provider == "NTNU":
-            available_models = [
-                "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-                "moonshotai/Kimi-K2.5", 
-                "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
-                "meta-llama/Llama-3.3-70B-Instruct",
-                "microsoft/Phi-3.5-mini-instruct"
-            ]
-        elif llm_provider == "OpenAI":
-            available_models = [
-                "gpt-4o",
-                "gpt-4o-mini", 
-                "gpt-3.5-turbo",
-                "o1-preview",
-                "o1-mini"
-            ]
-        elif llm_provider == "Ollama":
-            available_models = [
-                "llama3.2",
-                "mistral",
-                "codellama",
-                "phi3",
-                "qwen2.5"
-            ]
-        elif llm_provider == "Google":
-            available_models = [
-                "gemini-1.5-pro",
-                "gemini-1.5-flash",
-                "gemini-1.0-pro"
-            ]
-        else:  # Anthropic
-            available_models = [
-                "claude-3.5-sonnet",
-                "claude-3-opus",
-                "claude-3-haiku"
-            ]
-        
-        selected_model = st.selectbox(
-            "Model",
-            options=available_models,
-            index=0 if llm_provider == "NTNU" else 0,
-            help=f"Select the {llm_provider} model to use"
-        )
-        explore_vs_acc = st.slider(
-        "Exploration vs Accuracy",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.1,  # Default value
-        step=0.1,  # Step size for the slider
-        help="Select a value between 0 (accuracy) and 1 (exploration)"
-    )
-        
-        # Store in session state
-        st.session_state.llm_provider = llm_provider
-        st.session_state.selected_model = selected_model
-        st.session_state.explore_vs_acc = explore_vs_acc
-        # Show current configuration
-        with st.expander("Current LLM Configuration"):
-            st.code(f"Provider: {llm_provider}\nModel: {selected_model}", language="yaml")
+        # Update session state
+        if app_mode != st.session_state.app_mode:
+            st.session_state.app_mode = app_mode
+            st.rerun()
         
         st.markdown("---")
         
-        st.header("Norwegian Wind Farm Selection")
-        st.markdown("Select a wind farm to analyze:")
-        
-        selected_farm = st.selectbox(
-            "Wind Farm",
-            options=list(NORWEGIAN_WIND_FARMS.keys()),
-            index=0,  # Default to Bessaker
-            help="Choose from major Norwegian wind farms"
-        )
-        
-        # Show selected wind farm info in sidebar
-        farm_info = NORWEGIAN_WIND_FARMS[selected_farm]
-        st.markdown(f"**📍 Location:** {farm_info['location']}")
-        st.markdown(f"**🌐 Latitude:** {farm_info['latitude']}")
-        st.markdown(f"**🌐 Longitude:** {farm_info['longitude']}")
-        st.markdown(f"**⚡ Capacity:** {farm_info['capacity_mw']} MW")
-        st.markdown(f"**🌀 Turbines:** {farm_info['turbines']}")
-        
-        # Turbine Location Search
-        st.markdown("---")
-        st.header("🗺️ Turbine Locations")
-        
-        # Search for turbine locations when farm changes or button clicked
-        search_turbines = st.button("🔍 Search Turbine Locations")
-        
-        if search_turbines or (selected_farm != st.session_state.last_searched_farm):
-            with st.spinner(f"Searching for turbine locations at {selected_farm}..."):
-                search_results = search_turbine_locations(selected_farm, farm_info)
-                st.session_state.turbine_locations[selected_farm] = search_results
-                st.session_state.last_searched_farm = selected_farm
-        
-        # Display search results if available
-        if selected_farm in st.session_state.turbine_locations:
-            search_results = st.session_state.turbine_locations[selected_farm]
+        # =================================================================
+        # PREDICTIVE MAINTENANCE MODE CONTROLS
+        # =================================================================
+        # PREDICTIVE MAINTENANCE MODE - Sidebar Controls
+        # =================================================================
+        if app_mode == "Predictive Maintenance":
+            st.header("🏥 Predictive Maintenance")
+            st.markdown("**Fuhrlander FL2500 (2.5MW)**")
             
-            # Status indicator
-            status = search_results['search_status']
-            if status == 'found_exact':
-                st.success(f"✅ Found {search_results['total_turbines_found']} exact locations")
-            elif status == 'found_web':
-                st.info(f"ℹ️ Found {search_results['total_turbines_found']} locations from web")
-            elif status == 'estimated':
-                st.warning(f"⚠️ Generated {search_results['total_turbines_found']} estimated locations")
-            else:
-                st.error("❌ No turbine location data available")
-            
-            st.markdown(f"**Data Source:** {search_results['data_source']}")
-            
-            # Show map button
-            if search_results['turbine_locations']:
-                if st.button("📍 Show Turbine Map"):
-                    st.session_state.show_turbine_map = True
-        
-        st.markdown("---")
-        st.header("⚙️ Analysis Settings")
-        
-        # Agent Selection: Optional Agents
-        st.markdown("**Optional Analysis Agents:**")
-        col1, col2 = st.columns(2)
-        with col1:
-            enable_agent_2b = st.checkbox(
-                "🤖 Agent 2B (LLM Expert)",
-                value=True,
-                help="Enable LLM-based turbine control recommendations"
-            )
-        with col2:
-            enable_agent_4 = st.checkbox(
-                "🌊 Agent 4 (Wake Flow ROM)",
-                value=True,
-                help="Enable wake flow simulation using ROM"
-            )
-        
-        enable_agent_5 = st.checkbox(
-            "⚡ Agent 5 (Power Predictor)",
-            value=True,
-            help="Enable power prediction using GP model"
-        )
-        
-        # Store in session state
-        st.session_state.enable_agent_2b = enable_agent_2b
-        st.session_state.enable_agent_4 = enable_agent_4
-        st.session_state.enable_agent_5 = enable_agent_5
-        
-        st.markdown("---")
-        
-        # Agent 2C/2D Selection
-        st.markdown("**Turbine Pair Selection Agent:**")
-        agent_selection = st.radio(
-            "Choose turbine pair identification method:",
-            options=["Agent 2C (LLM-based)", "Agent 2D (Physical Wake Model)"],
-            index=0,
-            help="Agent 2C uses AI/LLM for intelligent analysis. Agent 2D uses physical wake models as backup when LLM is unavailable."
-        )
-        
-        # Store selection in session state
-        st.session_state.selected_agent = "2C" if "2C" in agent_selection else "2D"
-        
-        if st.session_state.selected_agent == "2D":
-            with st.expander("🔧 Agent 2D Wake Model Settings"):
-                wake_expansion_factor = st.slider(
-                    "Wake Expansion Factor", 
-                    min_value=0.05, max_value=0.2, value=0.1, step=0.01,
-                    help="Controls how quickly wake expands downstream (typical: 0.05-0.15)"
-                )
-                min_influence_threshold = st.slider(
-                    "Minimum Wake Influence (%)", 
-                    min_value=1.0, max_value=20.0, value=5.0, step=1.0,
-                    help="Minimum wake deficit percentage to consider significant"
-                ) / 100.0
+            # Load models button
+            if st.session_state.pdm_models is None:
+                if st.button("📦 Load PdM Models", type="primary", use_container_width=True):
+                    with st.spinner("Loading models..."):
+                        result = load_pdm_models()
+                        st.session_state.pdm_models = result
+                        if result is not None:
+                            st.rerun()
+                        # If result is None, error is already displayed by load_pdm_models()
                 
-                st.session_state.wake_expansion_factor = wake_expansion_factor
-                st.session_state.min_influence_threshold = min_influence_threshold
+                st.info("Click to load the predictive maintenance models")
+            else:
+                # Verify models loaded successfully and contain required data
+                if isinstance(st.session_state.pdm_models, dict) and 'test_data' in st.session_state.pdm_models:
+                    st.success("✅ Models loaded")
+                    
+                    models_dict = st.session_state.pdm_models
+                    test_data = models_dict['test_data']
+                    
+                    st.metric("Test Samples", f"{len(test_data['X_test']):,}")
+                    st.caption("Turbines 83 & 84")
+                else:
+                    st.error("❌ Models loaded but test data is missing")
+                    if st.button("🔄 Reload Models", use_container_width=True):
+                        st.session_state.pdm_models = None
+                        st.rerun()
+                
+                st.markdown("---")
+                
+                # Status indicator
+                if st.session_state.pdm_results is not None:
+                    st.success("✅ Inference complete")
+                    n_analyzed = st.session_state.pdm_results['n_samples']
+                    st.metric("Samples Analyzed", f"{n_analyzed:,}")
+                    
+                    if st.button("🔄 Reset Analysis", use_container_width=True):
+                        st.session_state.pdm_results = None
+                        st.rerun()
+                else:
+                    st.info("⚙️ Ready for inference")
+                    st.caption("Configure and run in main area →")
         
-        st.markdown("---")
-        
-        # Agent 3 Optimizer Settings
-        st.header("🎯 Agent 3: Optimizer Settings")
-        
-        # Optimization method selection
-        st.markdown("**Optimization Method:**")
-        opt_method = st.selectbox(
-            "Select method for wake steering optimization:",
-            options=['analytical_physics', 'ml_surrogate', 'grid_search'],
-            format_func=lambda x: {
-                'ml_surrogate': '🧠 ML Surrogate AD (Most Accurate)',
-                'analytical_physics': '📐 Analytical Physics AD (Fastest)',
-                'grid_search': '🔍 Grid Search (Brute-force)'
-            }[x],
-            index=0,
-            help="Choose optimization algorithm for yaw angle optimization"
-        )
-        
-        # Store in session state
-        st.session_state.opt_method = opt_method
-        
-        # Number of turbine pairs to optimize
-        max_pairs_to_optimize = st.slider(
-            "Max Turbine Pairs to Optimize",
-            min_value=1,
-            max_value=10,
-            value=4,
-            step=1,
-            help="Select how many top turbine pairs to optimize (based on wake influence)"
-        )
-        st.session_state.max_pairs_to_optimize = max_pairs_to_optimize
-        
-        with st.expander("📖 Method Descriptions"):
-            st.markdown("""
-            **🧠 ML Surrogate AD:**
-            - Fits polynomial surrogates to ML model predictions
-            - Enables true gradient-based optimization through ML models
-            - Most accurate but slower (~30-50 iterations)
+        # =================================================================
+        # WIND FARM ANALYSIS MODE CONTROLS
+        # =================================================================
+        else:  # Wind Farm Analysis mode
+            st.header("🤖 LLM Configuration (Agent 2B)")
+            st.markdown("Configure the AI model for turbine analysis:")
             
-            **📐 Analytical Physics AD:**
-            - Uses Bastankhah-Porté-Agel wake model
-            - Fast analytical gradients
-            - Good balance of speed and accuracy
+            # LLM Provider Selection
+            llm_provider = st.selectbox(
+                "LLM Provider",
+                options=["NTNU", "OpenAI", "Ollama", "Google", "Anthropic"],
+                index=0,  # Default to NTNU
+                help="Select the AI service provider"
+            )
             
-            **🔍 Grid Search:**
-            - Brute-force evaluation of all combinations
-            - No gradients, guaranteed to find best in search space
-            - Slowest for fine grids but most robust
-            """)
-        
-        st.markdown("---")
-        
-        n_timesteps = st.slider("Prediction Timesteps", min_value=10, max_value=100, value=50, step=10)
-        export_vtk = st.checkbox("Export VTK Files", value=False)
-        
-        st.markdown("---")
-        
-        run_analysis = st.button("🚀 Run Analysis", type="primary")
-        
-        if st.session_state.analysis_complete:
-            if st.button("🔄 Reset"):
-                st.session_state.analysis_complete = False
-                st.session_state.results = None
-                st.rerun()
-    
-    # =========================================================================
-    # TURBINE LOCATION MAP SECTION
-    # =========================================================================
-    # Display turbine map if requested
-    if hasattr(st.session_state, 'show_turbine_map') and st.session_state.show_turbine_map:
-        if selected_farm in st.session_state.turbine_locations:
-            search_results = st.session_state.turbine_locations[selected_farm]
+            # Model Selection based on provider
+            if llm_provider == "NTNU":
+                available_models = [
+                    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+                    "moonshotai/Kimi-K2.5", 
+                    "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+                    "meta-llama/Llama-3.3-70B-Instruct",
+                    "microsoft/Phi-3.5-mini-instruct"
+                ]
+            elif llm_provider == "OpenAI":
+                available_models = [
+                    "gpt-4o",
+                    "gpt-4o-mini", 
+                    "gpt-3.5-turbo",
+                    "o1-preview",
+                    "o1-mini"
+                ]
+            elif llm_provider == "Ollama":
+                available_models = [
+                    "llama3.2",
+                    "mistral",
+                    "codellama",
+                    "phi3",
+                    "qwen2.5"
+                ]
+            elif llm_provider == "Google":
+                available_models = [
+                    "gemini-1.5-pro",
+                    "gemini-1.5-flash",
+                    "gemini-1.0-pro"
+                ]
+            else:  # Anthropic
+                available_models = [
+                    "claude-3.5-sonnet",
+                    "claude-3-opus",
+                    "claude-3-haiku"
+                ]
+            
+            selected_model = st.selectbox(
+                "Model",
+                options=available_models,
+                index=0 if llm_provider == "NTNU" else 0,
+                help=f"Select the {llm_provider} model to use"
+            )
+            explore_vs_acc = st.slider(
+                "Exploration vs Accuracy",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.1,  # Default value
+                step=0.1,  # Step size for the slider
+                help="Select a value between 0 (accuracy) and 1 (exploration)"
+            )
+            
+            # Store in session state
+            st.session_state.llm_provider = llm_provider
+            st.session_state.selected_model = selected_model
+            st.session_state.explore_vs_acc = explore_vs_acc
+            # Show current configuration
+            with st.expander("Current LLM Configuration"):
+                st.code(f"Provider: {llm_provider}\\nModel: {selected_model}", language="yaml")
             
             st.markdown("---")
-            st.markdown(f"### 📍 Turbine Locations Map - {selected_farm}")
+            
+            st.header("Norwegian Wind Farm Selection")
+            st.markdown("Select a wind farm to analyze:")
+            
+            selected_farm = st.selectbox(
+                "Wind Farm",
+                options=list(NORWEGIAN_WIND_FARMS.keys()),
+                index=0,  # Default to Bessaker
+                help="Choose from major Norwegian wind farms"
+            )
+            
+            # Show selected wind farm info in sidebar
+            farm_info = NORWEGIAN_WIND_FARMS[selected_farm]
+            st.markdown(f"**📍 Location:** {farm_info['location']}")
+            st.markdown(f"**🌐 Latitude:** {farm_info['latitude']}")
+            st.markdown(f"**🌐 Longitude:** {farm_info['longitude']}")
+            st.markdown(f"**⚡ Capacity:** {farm_info['capacity_mw']} MW")
+            st.markdown(f"**🌀 Turbines:** {farm_info['turbines']}")
+            
+            # Turbine Location Search
+            st.markdown("---")
+            st.header("🗺️ Turbine Locations")
+            
+            # Search for turbine locations when farm changes or button clicked
+            search_turbines = st.button("🔍 Search Turbine Locations")
+            
+            if search_turbines or (selected_farm != st.session_state.last_searched_farm):
+                with st.spinner(f"Searching for turbine locations at {selected_farm}..."):
+                    search_results = search_turbine_locations(selected_farm, farm_info)
+                    st.session_state.turbine_locations[selected_farm] = search_results
+                    st.session_state.last_searched_farm = selected_farm
+            
+            # Display search results if available
+            if selected_farm in st.session_state.turbine_locations:
+                search_results = st.session_state.turbine_locations[selected_farm]
+                
+                # Status indicator
+                status = search_results['search_status']
+                if status == 'found_exact':
+                    st.success(f"\u2705 Found {search_results['total_turbines_found']} exact locations")
+                elif status == 'found_web':
+                    st.info(f"\u2139\ufe0f Found {search_results['total_turbines_found']} locations from web")
+                elif status == 'estimated':
+                    st.warning(f"\u26a0\ufe0f Generated {search_results['total_turbines_found']} estimated locations")
+                else:
+                    st.error("\u274c No turbine location data available")
+                
+                st.markdown(f"**Data Source:** {search_results['data_source']}")
+                
+                # Show map button
+                if search_results['turbine_locations']:
+                    if st.button("📍 Show Turbine Map"):
+                        st.session_state.show_turbine_map = True
+            
+            st.markdown("---")
+            st.header("⚙️ Analysis Settings")
+            
+            # Agent Selection: Optional Agents
+            st.markdown("**Optional Analysis Agents:**")
+            col1, col2 = st.columns(2)
+            with col1:
+                enable_agent_2b = st.checkbox(
+                    "🤖 Agent 2B (LLM Expert)",
+                    value=True,
+                    help="Enable LLM-based turbine control recommendations"
+                )
+            with col2:
+                enable_agent_4 = st.checkbox(
+                    "🌊 Agent 4 (Wake Flow ROM)",
+                    value=True,
+                    help="Enable wake flow simulation using ROM"
+                )
+            
+            enable_agent_5 = st.checkbox(
+                "⚡ Agent 5 (Power Predictor)",
+                value=True,
+                help="Enable power prediction using GP model"
+            )
+            
+            # Store in session state
+            st.session_state.enable_agent_2b = enable_agent_2b
+            st.session_state.enable_agent_4 = enable_agent_4
+            st.session_state.enable_agent_5 = enable_agent_5
+            
+            st.markdown("---")
+            
+            # Agent 2C/2D Selection
+            st.markdown("**Turbine Pair Selection Agent:**")
+            agent_selection = st.radio(
+                "Choose turbine pair identification method:",
+                options=["Agent 2C (LLM-based)", "Agent 2D (Physical Wake Model)"],
+                index=0,
+                help="Agent 2C uses AI/LLM for intelligent analysis. Agent 2D uses physical wake models as backup when LLM is unavailable."
+            )
+            
+            # Store selection in session state
+            st.session_state.selected_agent = "2C" if "2C" in agent_selection else "2D"
+            
+            if st.session_state.selected_agent == "2D":
+                with st.expander("🔧 Agent 2D Wake Model Settings"):
+                    wake_expansion_factor = st.slider(
+                        "Wake Expansion Factor", 
+                        min_value=0.05, max_value=0.2, value=0.1, step=0.01,
+                        help="Controls how quickly wake expands downstream (typical: 0.05-0.15)"
+                    )
+                    min_influence_threshold = st.slider(
+                        "Minimum Wake Influence (%)", 
+                        min_value=1.0, max_value=20.0, value=5.0, step=1.0,
+                        help="Minimum wake deficit percentage to consider significant"
+                    ) / 100.0
+                    
+                    st.session_state.wake_expansion_factor = wake_expansion_factor
+                    st.session_state.min_influence_threshold = min_influence_threshold
+            
+            st.markdown("---")
+            
+            # Agent 3 Optimizer Settings
+            st.header("🎯 Agent 3: Optimizer Settings")
+            
+            # Optimization method selection
+            st.markdown("**Optimization Method:**")
+            opt_method = st.selectbox(
+                "Select method for wake steering optimization:",
+                options=['analytical_physics', 'ml_surrogate', 'grid_search'],
+                format_func=lambda x: {
+                    'ml_surrogate': '🧠 ML Surrogate AD (Most Accurate)',
+                    'analytical_physics': '📐 Analytical Physics AD (Fastest)',
+                    'grid_search': '🔍 Grid Search (Brute-force)'
+                }[x],
+                index=0,
+                help="Choose optimization algorithm for yaw angle optimization"
+            )
+            
+            # Store in session state
+            st.session_state.opt_method = opt_method
+            
+            # Number of turbine pairs to optimize
+            max_pairs_to_optimize = st.slider(
+                "Max Turbine Pairs to Optimize",
+                min_value=1,
+                max_value=10,
+                value=4,
+                step=1,
+                help="Select how many top turbine pairs to optimize (based on wake influence)"
+            )
+            st.session_state.max_pairs_to_optimize = max_pairs_to_optimize
+            
+            with st.expander("📖 Method Descriptions"):
+                st.markdown("""
+                **🧠 ML Surrogate AD:**
+                - Fits polynomial surrogates to ML model predictions
+                - Enables true gradient-based optimization through ML models
+                - Most accurate but slower (~30-50 iterations)
+                
+                **📐 Analytical Physics AD:**
+                - Uses Bastankhah-Porté-Agel wake model
+                - Fast analytical gradients
+                - Good balance of speed and accuracy
+                
+                **🔍 Grid Search:**
+                - Brute-force evaluation of all combinations
+                - No gradients, guaranteed to find best in search space
+                - Slowest for fine grids but most robust
+                """)
+            
+            st.markdown("---")
+            
+            n_timesteps = st.slider("Prediction Timesteps", min_value=10, max_value=100, value=50, step=10)
+            export_vtk = st.checkbox("Export VTK Files", value=False)
+            
+            st.markdown("---")
+            
+            run_analysis = st.button("🚀 Run Analysis", type="primary")
+            
+            if st.session_state.analysis_complete:
+                if st.button("🔄 Reset"):
+                    st.session_state.analysis_complete = False
+                    st.session_state.results = None
+                    st.rerun()
+    
+    # =========================================================================
+    # MAIN CONTENT AREA
+    # =========================================================================
+    
+    # Handle Predictive Maintenance Mode
+    if st.session_state.app_mode == "Predictive Maintenance":
+        if st.session_state.pdm_results is not None:
+            # Display results when available
+            display_pdm_results(st.session_state.pdm_results, st.session_state.pdm_models)
+        
+        elif st.session_state.pdm_models is not None:
+            # Models loaded but inference not yet run - show configuration interface
+            # Verify models contain required data
+            if not isinstance(st.session_state.pdm_models, dict) or 'test_data' not in st.session_state.pdm_models:
+                st.error("❌ Models loaded but test data is missing. Please check RUL/saved_models directory.")
+                st.info("Required files: `fuhrlander_fl2500_pm_models.joblib`, `test_data.npz`, `metadata.json`")
+                if st.button("🔄 Reload Models"):
+                    st.session_state.pdm_models = None
+                    st.rerun()
+                return
+            
+            st.markdown("### ⚙️ Configure Predictive Maintenance Inference")
+            
+            test_data = st.session_state.pdm_models['test_data']
+            total_samples = len(test_data['X_test'])
+            
+            st.success(f"✅ Models loaded successfully! **{total_samples:,} test samples** available from Fuhrlander turbines 83 & 84.")
+            
+            st.markdown("---")
+            
+            # Create tabs for better organization
+            config_tab, info_tab = st.tabs(["🔬 Run Inference", "📚 Model Information"])
+            
+            with config_tab:
+                st.markdown("#### Select Test Data for Analysis")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    n_samples = st.slider(
+                        "📊 Number of samples for inference",
+                        min_value=100,
+                        max_value=min(5000, total_samples),
+                        value=1000,
+                        step=100,
+                        help="Select how many consecutive test samples to analyze"
+                    )
+                
+                with col2:
+                    sample_offset = st.slider(
+                        "🎯 Starting sample index",
+                        min_value=0,
+                        max_value=max(0, total_samples - n_samples),
+                        value=0,
+                        step=100,
+                        help="Choose where to start in the test dataset"
+                    )
+                
+                st.info(f"""
+                **Selection Summary:**
+                - Analyzing samples {sample_offset:,} to {sample_offset + n_samples:,} (out of {total_samples:,} total)
+                - Time span: ~{n_samples} hours of turbine operation data
+                - Turbines: 83 & 84 (Fuhrlander FL2500)
+                """)
+                
+                st.markdown("---")
+                
+                # Prominent run button
+                col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
+                with col_btn2:
+                    if st.button("🚀 Run Predictive Maintenance Inference", type="primary", use_container_width=True):
+                        with st.spinner("🔄 Running inference on all 5 models (Autoencoder, GMM, Classifiers, LSTM)..."):
+                            try:
+                                pdm_results = run_pdm_inference(
+                                    st.session_state.pdm_models,
+                                    n_samples=n_samples,
+                                    sample_offset=sample_offset
+                                )
+                                st.session_state.pdm_results = pdm_results
+                                st.success("✅ Inference complete! View results below.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Inference failed: {str(e)}")
+                                import traceback
+                                with st.expander("🔍 Error Details"):
+                                    st.code(traceback.format_exc())
+                
+                st.markdown("---")
+                st.markdown("""
+                **What happens when you run inference:**
+                1. 🧠 **Health Indicator (HI)** - Autoencoder reconstructs data to detect anomalies
+                2. 🎯 **Health States** - GMM clusters HI into Healthy/Degrading/Critical states
+                3. ⚠️ **Binary Classification** - Predicts presence/absence of faults
+                4. 🔍 **Multi-class Classification** - Identifies specific fault types
+                5. ⏱️ **RUL Prediction** - LSTM estimates remaining useful life in days
+                6. 📊 **Feature Importance** - SHAP explains which SCADA features drive predictions
+                """)
+            
+            with info_tab:
+                st.markdown("#### 📚 Model Architecture Details")
+                
+                col_a, col_b = st.columns(2)
+                
+                with col_a:
+                    st.markdown("""
+                    **Training Data:**
+                    - Turbines: 80, 81, 82
+                    - Samples: 53,810 hourly records
+                    - Period: Healthy + degradation phases
+                    
+                    **Test Data:**
+                    - Turbines: 83, 84
+                    - Samples: 35,411 hourly records
+                    - Purpose: Unseen turbine validation
+                    """)
+                
+                with col_b:
+                    st.markdown("""
+                    **Features (27 total):**
+                    - **SCADA (18):** Power, wind speed, temperatures, vibrations, blade angles
+                    - **Engineered (9):** Rolling statistics, power efficiency, load factors
+                    
+                    **Models:**
+                    - Autoencoder: Anomaly detection
+                    - GMM: State clustering
+                    - GradientBoosting: Binary fault classifier
+                    - RandomForest: Multi-class fault classifier
+                    - LSTM: Sequential RUL predictor
+                    """)
+                
+                st.markdown("---")
+                st.markdown("#### 🎯 Prediction Targets")
+                st.markdown("""
+                | Model | Output | Interpretation |
+                |-------|--------|----------------|
+                | Autoencoder | Health Indicator (0-1) | 0 = Healthy, 1 = Anomalous |
+                | GMM | Health State (0-2) | 0 = Healthy, 1 = Degrading, 2 = Critical |
+                | Binary Classifier | Fault (0-1) | 0 = No Fault, 1 = Fault Present |
+                | Multi-class Classifier | Fault Type (0-N) | Specific component failure modes |
+                | LSTM | RUL (days) | Estimated days until failure |
+                """)
+        
+        else:
+            # Welcome screen for PdM mode - no models loaded yet
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                st.markdown("### 🏥 Predictive Maintenance Module")
+                st.info("""
+                **Fuhrlander FL2500 (2.5MW) Turbine Health Monitoring**
+                
+                This module provides comprehensive predictive maintenance analysis:
+                
+                📊 **Health Indicator (HI)**: Autoencoder-based anomaly detection  
+                🎯 **Health States**: GMM classification (Healthy/Degrading/Critical)  
+                ⚠️ **Fault Probability**: Binary and multi-class fault prediction  
+                ⏱️ **Remaining Useful Life**: LSTM-based RUL estimation  
+                🔍 **Feature Importance**: SHAP-based explainability
+                
+                👈 **Get Started:** Load the PdM models from the sidebar to begin.
+                """)
+                
+                st.markdown("---")
+                st.markdown("#### 📚 Model Information")
+                st.write("""
+                - **Training Data**: Turbines 80, 81, 82 (53,810 hourly samples)
+                - **Test Data**: Turbines 83, 84 (35,411 hourly samples)
+                - **Features**: 27 (18 SCADA + 9 engineered)
+                - **Models**: Autoencoder, GMM, GradientBoosting, RandomForest, LSTM
+                """)
+    
+    # Handle Wind Farm Analysis Mode
+    elif st.session_state.app_mode == "Wind Farm Analysis":
+        # =========================================================================
+        # TURBINE LOCATION MAP SECTION
+        # =========================================================================
+        # Display turbine map if requested
+        if hasattr(st.session_state, 'show_turbine_map') and st.session_state.show_turbine_map:
+            if selected_farm in st.session_state.turbine_locations:
+                search_results = st.session_state.turbine_locations[selected_farm]
+                
+                st.markdown("---")
+                st.markdown(f"### 📍 Turbine Locations Map - {selected_farm}")
             
             # Create map data
             turbine_map_data = create_turbine_map(farm_info, search_results['turbine_locations'])
@@ -2879,38 +4646,38 @@ def main():
                     st.rerun()
             else:
                 st.error("Unable to create map - no valid turbine location data.")
-    
-    # =========================================================================
-    # ML MODEL DEMONSTRATION SECTION
-    # =========================================================================
-    st.markdown("---")
-    st.markdown("### 🔬 ML Model Demonstration: Explore Wake & Power vs Yaw Misalignment")
-    st.markdown('''
-    <p style="font-size: 0.95rem; color: #666; margin-top: -10px;">
-    <b>Interact with the trained ML models</b> to see how yaw misalignment affects wake flow and power output.
-    Adjust the slider below to explore the model predictions.
-    </p>
-    ''', unsafe_allow_html=True)
-    
-    # User input for yaw misalignment
-    #demo_col1, demo_col2 = st.columns([1, 2])
-    with st.container():
-        st.markdown("""
-        **ML Models Developed by SINTEF Digital (mandar.tabib@sintef.no):**
         
-        | Model | Description | Input | Output |
-        |-------|-------------|-------|--------|
-        | **TT-OpInf ROM** | Tensor Train Decomposition + Operator Inference | Yaw Direction (0°-15°) |  Wake Velocity Field |
-        | **GP Regressor** | Gaussian Process trained on CFD data | Yaw Direction (0°-15°)  | Rotor Power (MW) with uncertainty |
-       
-        *Models trained at SINTEF on high-fidelity CFD simulations of NREL 5MW turbine.*
-        """)
-    with st.container(): #demo_col1:
-        user_yaw_misalignment = st.slider(
-            "🎚️ Yaw Misalignment (degrees)",
-            min_value=0.0,
-            max_value=15.0,
-            value=0.0,
+        # =========================================================================
+        # ML MODEL DEMONSTRATION SECTION
+        # =========================================================================
+        st.markdown("---")
+        st.markdown("### 🔬 ML Model Demonstration: Explore Wake & Power vs Yaw Misalignment")
+        st.markdown('''
+        <p style="font-size: 0.95rem; color: #666; margin-top: -10px;">
+        <b>Interact with the trained ML models</b> to see how yaw misalignment affects wake flow and power output.
+        Adjust the slider below to explore the model predictions.
+        </p>
+        ''', unsafe_allow_html=True)
+        
+        # User input for yaw misalignment
+        #demo_col1, demo_col2 = st.columns([1, 2])
+        with st.container():
+            st.markdown("""
+            **ML Models Developed by SINTEF Digital (mandar.tabib@sintef.no):**
+            
+            | Model | Description | Input | Output |
+            |-------|-------------|-------|--------|
+            | **TT-OpInf ROM** | Tensor Train Decomposition + Operator Inference | Yaw Direction (0\u00b0-15\u00b0) |  Wake Velocity Field |
+            | **GP Regressor** | Gaussian Process trained on CFD data | Yaw Direction (0\u00b0-15\u00b0)  | Rotor Power (MW) with uncertainty |
+           
+            *Models trained at SINTEF on high-fidelity CFD simulations of NREL 5MW turbine.*
+            """)
+        with st.container(): #demo_col1:
+            user_yaw_misalignment = st.slider(
+                "🎚️ Yaw Misalignment (degrees)",
+                min_value=0.0,
+                max_value=15.0,
+                value=0.0,
             step=1.0,
             help="0° = aligned with wind, 15° = maximum misalignment"
         )
@@ -2932,238 +4699,238 @@ def main():
         )
         
         run_demo = st.button("🔄 Run Model Prediction", type="secondary")
-    
-    
-    #Nacelle Direction (270°-285°) for ML models AS proxy for yaw direction.
-    # Run demonstration when button is clicked or slider changes
-    if run_demo or ('demo_results' not in st.session_state):
-        with st.spinner("Running ML model predictions..."):
-            try:
-                power_agent, wake_agent = load_agents()
-                
-                # Store demo results in session state
-                st.session_state.demo_yaw = user_yaw_misalignment
-                st.session_state.demo_nacelle = user_nacelle_direction
-                
-                # ============================================================
-                # Power Prediction (GP Model)
-                # ============================================================
-                power_result = power_agent.predict(
-                    yaw_angle=user_nacelle_direction,
-                    n_time_points=30,
-                    return_samples=True,
-                    n_samples=20
-                )
-                
-                # ============================================================
-                # Wake Flow Prediction (TT-OpInf ROM)
-                # ============================================================
-                wake_predictions, _ = wake_agent.predict(
-                    yaw_angle=user_nacelle_direction,
-                    n_timesteps=30,
-                    export_vtk=False,
-                    verbose=False
-                )
-                
-                st.session_state.demo_power = power_result
-                st.session_state.demo_wake = wake_predictions
-                st.session_state.demo_results = True
-                
-            except Exception as e:
-                st.error(f"Model prediction failed: {e}")
-                st.session_state.demo_results = False
-    
-    # Display demonstration results
-    if st.session_state.get('demo_results', False):
-        st.markdown("---")
         
-        demo_tab1, demo_tab2 = st.tabs([
-            "⚡ Power Prediction (GP Regressor)", 
-            "🌊 Wake Flow (TT-OpInf ROM)"
-        ])
         
-        with demo_tab1:
-            st.markdown(f"#### Gaussian Process Power Prediction at Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}°")
-            
-            power_result = st.session_state.get('demo_power', {})
-            
-            if power_result:
-                power_time_series = power_result['power_mean_MW']
-                std_time_series = power_result['power_std_MW']
-                t = power_result['normalized_time']
-                
-                # Use time range 0.1 to 0.9 for statistics
-                valid_idx = (t >= 0.1) & (t <= 0.9)
-                t_valid = t[valid_idx]
-                
-                # Calculate statistics from power_mean_MW vector (analytical GP mean)
-                mean_power = np.mean(power_time_series[valid_idx])
-                min_power = np.min(power_time_series[valid_idx])
-                max_power = np.max(power_time_series[valid_idx])
-                power_variation = max_power - min_power
-                
-                # Display statistics from analytical GP mean (t=0.1-0.9)
-                st.markdown("**📈 Power Statistics from Analytical GP Mean (t=0.1-0.9):**")
-                pcol1, pcol2, pcol3, pcol4 = st.columns(4)
-                with pcol1:
-                    st.metric("Time-Averaged", f"{mean_power:.3f} MW", help="np.mean(power_mean_MW)")
-                with pcol2:
-                    st.metric("Min Power", f"{min_power:.3f} MW", help="np.min(power_mean_MW)")
-                with pcol3:
-                    st.metric("Max Power", f"{max_power:.3f} MW", help="np.max(power_mean_MW)")
-                with pcol4:
-                    st.metric("Variation (ΔP)", f"{power_variation:.3f} MW", help="Max - Min")
-                
-                # Power time series plot (t=0.1-0.9)
-                fig_power, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4))
-                
-                # Left plot: Time series with samples (t=0.1-0.9)
-                if 'samples' in power_result and power_result['samples'] is not None:
-                    samples = power_result['samples']
-                    samples_valid = samples[:, valid_idx]
-                    for i in range(min(15, samples.shape[0])):
-                        ax1.plot(t_valid, samples_valid[i], 'steelblue', alpha=0.12, linewidth=0.7,
-                                label='GP Posterior Samples' if i == 0 else '')
-                
-                ax1.plot(t_valid, power_time_series[valid_idx], 'darkblue', linewidth=2.5, 
-                        label='GP Mean Prediction (power_mean_MW)')
-                ax1.fill_between(t_valid, power_result['power_lower_95_MW'][valid_idx], 
-                                power_result['power_upper_95_MW'][valid_idx],
-                               alpha=0.15, color='gray', label='95% CI')
-                
-                ax1.axhline(y=mean_power, color='red', linestyle='--', linewidth=2, alpha=0.8,
-                           label=f'Time-Average of GP Mean: {mean_power:.3f} MW')
-                
-                ax1.set_xlabel('Normalized Time')
-                ax1.set_ylabel('Power (MW)')
-                ax1.set_title(f'GP Power Prediction (t=0.1-0.9)\nYaw Misalignment = {st.session_state.get("demo_yaw", 0):.0f}°')
-                ax1.legend(loc='best', fontsize=8)
-                ax1.grid(True, alpha=0.3)
-                
-                # Right plot: Power distribution histogram (using valid data)
-                ax2.hist(power_time_series[valid_idx], bins=20, density=True, alpha=0.7, color='steelblue', 
-                        edgecolor='black', label='Power distribution')
-                ax2.axvline(x=mean_power, color='red', linestyle='-', linewidth=2, label=f'Mean: {mean_power:.3f} MW')
-                ax2.axvline(x=min_power, color='green', linestyle='--', linewidth=1.5, label=f'Min: {min_power:.3f} MW')
-                ax2.axvline(x=max_power, color='orange', linestyle='--', linewidth=1.5, label=f'Max: {max_power:.3f} MW')
-                ax2.set_xlabel('Power (MW)')
-                ax2.set_ylabel('Probability Density')
-                ax2.set_title(f'Power Distribution (t=0.1-0.9)\n(ΔP = {power_variation:.3f} MW)')
-                ax2.legend(loc='best', fontsize=8)
-                ax2.grid(True, alpha=0.3)
-                
-                plt.tight_layout()
-                st.pyplot(fig_power)
-                plt.close()
-                
-                st.markdown(f"""
-                **📊 Plot Legend:**
-                | Line Type | Description | Computation |
-                |-----------|-------------|-------------|
-                | **Light blue lines** | GP posterior samples | Random draws from GP distribution (samples array) |
-                | **Dark blue line** | GP mean prediction | `power_mean_MW` - GP's expected value at each time point |
-                | **Red dashed line** | Time-average of dark blue line | `np.mean(power_mean_MW)` = {mean_power:.3f} MW |
-                
-                **Statistics Computed (t=0.1-0.9):**
-                - Time-Averaged = `np.mean(power_mean_MW)` = {mean_power:.3f} MW
-                - Min Power = `np.min(power_mean_MW)` = {min_power:.3f} MW  
-                - Max Power = `np.max(power_mean_MW)` = {max_power:.3f} MW
-                - Variation = Max - Min = {power_variation:.3f} MW
-                """)
-        
-        with demo_tab2:
-            st.markdown(f"#### TT-OpInf Wake Flow ROM at Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}°")
-            
-            wake_predictions = st.session_state.get('demo_wake', None)
-            
-            if wake_predictions is not None:
-                velocity_mag = np.linalg.norm(wake_predictions, axis=2)
-                
-                wcol1, wcol2, wcol3 = st.columns(3)
-                with wcol1:
-                    st.metric("Spatial Points", f"{wake_predictions.shape[1]:,}")
-                with wcol2:
-                    st.metric("Mean Velocity", f"{np.mean(velocity_mag):.2f} m/s")
-                with wcol3:
-                    st.metric("Timesteps", wake_predictions.shape[0])
-                
-                # Create wake visualization
+        #Nacelle Direction (270°-285°) for ML models AS proxy for yaw direction.
+        # Run demonstration when button is clicked or slider changes
+        if run_demo or ('demo_results' not in st.session_state):
+            with st.spinner("Running ML model predictions..."):
                 try:
-                    from wake_animation import create_wake_contour_animation
+                    power_agent, wake_agent = load_agents()
                     
-                    demo_anim_path = os.path.join(SCRIPT_DIR, f"wake_demo_yaw_{st.session_state.get('demo_yaw', 0):.0f}.gif")
-                    grid_path = str(PROJECT_ROOT / "ResultMLYaw" / "Grid_data.vtk")
+                    # Store demo results in session state
+                    st.session_state.demo_yaw = user_yaw_misalignment
+                    st.session_state.demo_nacelle = user_nacelle_direction
                     
-                    create_wake_contour_animation(
-                        predictions=wake_predictions,
-                        grid_path=grid_path,
-                        output_path=demo_anim_path,
-                        fps=8,
-                        frame_skip=max(1, wake_predictions.shape[0] // 15),
-                        cmap="RdYlBu_r",
-                        verbose=False,
-                        yaw_misalignment=st.session_state.get('demo_yaw', 0)
+                    # ============================================================
+                    # Power Prediction (GP Model)
+                    # ============================================================
+                    power_result = power_agent.predict(
+                        yaw_angle=user_nacelle_direction,
+                        n_time_points=30,
+                        return_samples=True,
+                        n_samples=20
                     )
                     
-                    st.image(demo_anim_path, caption=f"Wake Flow | Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}° | Nacelle = {st.session_state.get('demo_nacelle', 270):.0f}°")
+                    # ============================================================
+                    # Wake Flow Prediction (TT-OpInf ROM)
+                    # ============================================================
+                    wake_predictions, _ = wake_agent.predict(
+                        yaw_angle=user_nacelle_direction,
+                        n_timesteps=30,
+                        export_vtk=False,
+                        verbose=False
+                    )
+                    
+                    st.session_state.demo_power = power_result
+                    st.session_state.demo_wake = wake_predictions
+                    st.session_state.demo_results = True
                     
                 except Exception as e:
-                    # Fallback: show velocity statistics
-                    st.warning(f"Animation unavailable: {e}")
-                    
-                    fig_wake, ax = plt.subplots(figsize=(10, 4))
-                    
-                    # Plot velocity magnitude over time for a few sample points
-                    n_samples = min(100, velocity_mag.shape[1])
-                    sample_idx = np.random.choice(velocity_mag.shape[1], n_samples, replace=False)
-                    
-                    for i in sample_idx[:10]:
-                        ax.plot(velocity_mag[:, i], alpha=0.3, linewidth=0.5)
-                    
-                    ax.plot(np.mean(velocity_mag, axis=1), 'r-', linewidth=2, label='Mean velocity')
-                    ax.fill_between(
-                        range(velocity_mag.shape[0]),
-                        np.percentile(velocity_mag, 5, axis=1),
-                        np.percentile(velocity_mag, 95, axis=1),
-                        alpha=0.2, color='gray', label='5-95 percentile'
-                    )
-                    
-                    # Add turbine marker with rotation based on yaw misalignment
-                    yaw_misalignment = st.session_state.get('demo_yaw', 0)  # Get yaw misalignment
-                    turbine_marker = plt.Line2D([0], [0], color='black', linewidth=5, label='Turbine')
-                    ax.add_line(turbine_marker)
-                    rotate_line(turbine_marker, -yaw_misalignment, ax)
-                    # Apply rotation transformation
-                    #from matplotlib.transforms import Affine2D
-                    #rotation = Affine2D().rotate_deg(-yaw_misalignment)  # Rotate clockwise by yaw_misalignment
-                    #turbine_marker.set_transform(rotation + ax.transData)
-
-                    ax.set_xlabel('Timestep')
-                    ax.set_ylabel('Velocity Magnitude (m/s)')
-                    ax.set_title(f'Wake Velocity Evolution | Yaw Misalignment = {yaw_misalignment:.0f}°')
-                    ax.legend()
-                    ax.grid(True, alpha=0.3)
-                    plt.tight_layout()
-                    st.pyplot(fig_wake)
-                    plt.close()
-    
-    st.markdown("---")
-    
-    # Main content area
-    if run_analysis and selected_farm:
-        run_full_analysis(selected_farm, n_timesteps, export_vtk)
-    
-    elif st.session_state.analysis_complete and st.session_state.results:
-        display_results(st.session_state.results)
-    
-    else:
-        # Welcome screen
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/a/a4/Windmills_D1-D4_%28Thornton_Bank%29.jpg/1280px-Windmills_D1-D4_%28Thornton_Bank%29.jpg", 
-                    caption="Offshore Wind Turbines")
+                    st.error(f"Model prediction failed: {e}")
+                    st.session_state.demo_results = False
+        
+        # Display demonstration results
+        if st.session_state.get('demo_results', False):
+            st.markdown("---")
             
-            st.info("👈 Enter the wind turbine location in the sidebar and click **Run Analysis** to begin.")
+            demo_tab1, demo_tab2 = st.tabs([
+                "⚡ Power Prediction (GP Regressor)", 
+                "🌊 Wake Flow (TT-OpInf ROM)"
+            ])
+            
+            with demo_tab1:
+                st.markdown(f"#### Gaussian Process Power Prediction at Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}°")
+                
+                power_result = st.session_state.get('demo_power', {})
+                
+                if power_result:
+                    power_time_series = power_result['power_mean_MW']
+                    std_time_series = power_result['power_std_MW']
+                    t = power_result['normalized_time']
+                    
+                    # Use time range 0.1 to 0.9 for statistics
+                    valid_idx = (t >= 0.1) & (t <= 0.9)
+                    t_valid = t[valid_idx]
+                    
+                    # Calculate statistics from power_mean_MW vector (analytical GP mean)
+                    mean_power = np.mean(power_time_series[valid_idx])
+                    min_power = np.min(power_time_series[valid_idx])
+                    max_power = np.max(power_time_series[valid_idx])
+                    power_variation = max_power - min_power
+                    
+                    # Display statistics from analytical GP mean (t=0.1-0.9)
+                    st.markdown("**📈 Power Statistics from Analytical GP Mean (t=0.1-0.9):**")
+                    pcol1, pcol2, pcol3, pcol4 = st.columns(4)
+                    with pcol1:
+                        st.metric("Time-Averaged", f"{mean_power:.3f} MW", help="np.mean(power_mean_MW)")
+                    with pcol2:
+                        st.metric("Min Power", f"{min_power:.3f} MW", help="np.min(power_mean_MW)")
+                    with pcol3:
+                        st.metric("Max Power", f"{max_power:.3f} MW", help="np.max(power_mean_MW)")
+                    with pcol4:
+                        st.metric("Variation (ΔP)", f"{power_variation:.3f} MW", help="Max - Min")
+                    
+                    # Power time series plot (t=0.1-0.9)
+                    fig_power, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4))
+                    
+                    # Left plot: Time series with samples (t=0.1-0.9)
+                    if 'samples' in power_result and power_result['samples'] is not None:
+                        samples = power_result['samples']
+                        samples_valid = samples[:, valid_idx]
+                        for i in range(min(15, samples.shape[0])):
+                            ax1.plot(t_valid, samples_valid[i], 'steelblue', alpha=0.12, linewidth=0.7,
+                                    label='GP Posterior Samples' if i == 0 else '')
+                    
+                    ax1.plot(t_valid, power_time_series[valid_idx], 'darkblue', linewidth=2.5, 
+                            label='GP Mean Prediction (power_mean_MW)')
+                    ax1.fill_between(t_valid, power_result['power_lower_95_MW'][valid_idx], 
+                                    power_result['power_upper_95_MW'][valid_idx],
+                                   alpha=0.15, color='gray', label='95% CI')
+                    
+                    ax1.axhline(y=mean_power, color='red', linestyle='--', linewidth=2, alpha=0.8,
+                               label=f'Time-Average of GP Mean: {mean_power:.3f} MW')
+                    
+                    ax1.set_xlabel('Normalized Time')
+                    ax1.set_ylabel('Power (MW)')
+                    ax1.set_title(f'GP Power Prediction (t=0.1-0.9)\nYaw Misalignment = {st.session_state.get("demo_yaw", 0):.0f}°')
+                    ax1.legend(loc='best', fontsize=8)
+                    ax1.grid(True, alpha=0.3)
+                    
+                    # Right plot: Power distribution histogram (using valid data)
+                    ax2.hist(power_time_series[valid_idx], bins=20, density=True, alpha=0.7, color='steelblue', 
+                            edgecolor='black', label='Power distribution')
+                    ax2.axvline(x=mean_power, color='red', linestyle='-', linewidth=2, label=f'Mean: {mean_power:.3f} MW')
+                    ax2.axvline(x=min_power, color='green', linestyle='--', linewidth=1.5, label=f'Min: {min_power:.3f} MW')
+                    ax2.axvline(x=max_power, color='orange', linestyle='--', linewidth=1.5, label=f'Max: {max_power:.3f} MW')
+                    ax2.set_xlabel('Power (MW)')
+                    ax2.set_ylabel('Probability Density')
+                    ax2.set_title(f'Power Distribution (t=0.1-0.9)\n(ΔP = {power_variation:.3f} MW)')
+                    ax2.legend(loc='best', fontsize=8)
+                    ax2.grid(True, alpha=0.3)
+                    
+                    plt.tight_layout()
+                    st.pyplot(fig_power)
+                    plt.close()
+                    
+                    st.markdown(f"""
+                    **📊 Plot Legend:**
+                    | Line Type | Description | Computation |
+                    |-----------|-------------|-------------|
+                    | **Light blue lines** | GP posterior samples | Random draws from GP distribution (samples array) |
+                    | **Dark blue line** | GP mean prediction | `power_mean_MW` - GP's expected value at each time point |
+                    | **Red dashed line** | Time-average of dark blue line | `np.mean(power_mean_MW)` = {mean_power:.3f} MW |
+                    
+                    **Statistics Computed (t=0.1-0.9):**
+                    - Time-Averaged = `np.mean(power_mean_MW)` = {mean_power:.3f} MW
+                    - Min Power = `np.min(power_mean_MW)` = {min_power:.3f} MW  
+                    - Max Power = `np.max(power_mean_MW)` = {max_power:.3f} MW
+                    - Variation = Max - Min = {power_variation:.3f} MW
+                    """)
+            
+            with demo_tab2:
+                st.markdown(f"#### TT-OpInf Wake Flow ROM at Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}°")
+                
+                wake_predictions = st.session_state.get('demo_wake', None)
+                
+                if wake_predictions is not None:
+                    velocity_mag = np.linalg.norm(wake_predictions, axis=2)
+                    
+                    wcol1, wcol2, wcol3 = st.columns(3)
+                    with wcol1:
+                        st.metric("Spatial Points", f"{wake_predictions.shape[1]:,}")
+                    #with wcol2:
+                        #st.metric("Mean Velocity", f"{np.mean(velocity_mag):.2f} m/s")
+                    with wcol3:
+                        st.metric("Timesteps", wake_predictions.shape[0])
+                    
+                    # Create wake visualization
+                    try:
+                        from wake_animation import create_wake_contour_animation
+                        
+                        demo_anim_path = os.path.join(SCRIPT_DIR, f"wake_demo_yaw_{st.session_state.get('demo_yaw', 0):.0f}.gif")
+                        grid_path = str(PROJECT_ROOT / "ResultMLYaw" / "Grid_data.vtk")
+                        
+                        create_wake_contour_animation(
+                            predictions=wake_predictions,
+                            grid_path=grid_path,
+                            output_path=demo_anim_path,
+                            fps=8,
+                            frame_skip=max(1, wake_predictions.shape[0] // 15),
+                            cmap="RdYlBu_r",
+                            verbose=False,
+                            yaw_misalignment=st.session_state.get('demo_yaw', 0)
+                        )
+                        
+                        st.image(demo_anim_path, caption=f"Wake Flow | Yaw Misalignment = {st.session_state.get('demo_yaw', 0):.0f}° | Nacelle = {st.session_state.get('demo_nacelle', 270):.0f}°")
+                        
+                    except Exception as e:
+                        # Fallback: show velocity statistics
+                        st.warning(f"Animation unavailable: {e}")
+                        
+                        fig_wake, ax = plt.subplots(figsize=(10, 4))
+                        
+                        # Plot velocity magnitude over time for a few sample points
+                        n_samples = min(100, velocity_mag.shape[1])
+                        sample_idx = np.random.choice(velocity_mag.shape[1], n_samples, replace=False)
+                        
+                        for i in sample_idx[:10]:
+                            ax.plot(velocity_mag[:, i], alpha=0.3, linewidth=0.5)
+                        
+                        ax.plot(np.mean(velocity_mag, axis=1), 'r-', linewidth=2, label='Mean velocity')
+                        ax.fill_between(
+                            range(velocity_mag.shape[0]),
+                            np.percentile(velocity_mag, 5, axis=1),
+                            np.percentile(velocity_mag, 95, axis=1),
+                            alpha=0.2, color='gray', label='5-95 percentile'
+                        )
+                        
+                        # Add turbine marker with rotation based on yaw misalignment
+                        yaw_misalignment = st.session_state.get('demo_yaw', 0)  # Get yaw misalignment
+                        turbine_marker = plt.Line2D([0], [0], color='black', linewidth=5, label='Turbine')
+                        ax.add_line(turbine_marker)
+                        rotate_line(turbine_marker, -yaw_misalignment, ax)
+                        # Apply rotation transformation
+                        #from matplotlib.transforms import Affine2D
+                        #rotation = Affine2D().rotate_deg(-yaw_misalignment)  # Rotate clockwise by yaw_misalignment
+                        #turbine_marker.set_transform(rotation + ax.transData)
+
+                        ax.set_xlabel('Timestep')
+                        ax.set_ylabel('Velocity Magnitude (m/s)')
+                        ax.set_title(f'Wake Velocity Evolution | Yaw Misalignment = {yaw_misalignment:.0f}°')
+                        ax.legend()
+                        ax.grid(True, alpha=0.3)
+                        plt.tight_layout()
+                        st.pyplot(fig_wake)
+                        plt.close()
+            
+            st.markdown("---")
+        
+        # Main content area - Wind Farm Analysis flow
+        if run_analysis and selected_farm:
+            run_full_analysis(selected_farm, n_timesteps, export_vtk)
+        
+        elif st.session_state.analysis_complete and st.session_state.results:
+            display_results(st.session_state.results)
+        
+        else:
+            # Welcome screen
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/a/a4/Windmills_D1-D4_%28Thornton_Bank%29.jpg/1280px-Windmills_D1-D4_%28Thornton_Bank%29.jpg", 
+                        caption="Offshore Wind Turbines")
+                
+                st.info("👈 Enter the wind turbine location in the sidebar and click **Run Analysis** to begin.")
 
 
 def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
@@ -4249,7 +6016,7 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
     # =========================================================================
     # AGENT 4: Wind Turbine Wake Flow at Recommended Yaw Angle: A Reduced Order Model (OPTIONAL)
     # =========================================================================
-    enable_agent_4 = st.session_state.get('enable_agent_4', True)
+    enable_agent_4 = st.session_state.get('enable_agent_4', False)
     
     if enable_agent_4:
         st.markdown("### 🌊 Agent 4: Wind Turbine Wake Flow: A Reduced Order Model")
@@ -4374,7 +6141,7 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
     # =========================================================================
     # AGENT 5: Power Predictor (OPTIONAL)
     # =========================================================================
-    enable_agent_5 = st.session_state.get('enable_agent_5', True)
+    enable_agent_5 = st.session_state.get('enable_agent_5', False)
     
     if enable_agent_5:
         st.markdown("### ⚡ Agent 5: Power Predictor")

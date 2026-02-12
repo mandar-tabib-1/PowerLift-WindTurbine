@@ -1,0 +1,57 @@
+{
+  "description": "Fuhrlander FL2500 Predictive Maintenance - Trained Models",
+  "saved_at": "2026-02-12T10:10:30.101693",
+  "files": {
+    "fuhrlander_fl2500_pm_models.joblib": "All model artifacts (AE weights, GMM, classifiers, LSTM, thresholds)",
+    "test_data.npz": "Test feature matrix X_test ((35411, 27)) and labels y_test ((35411,))",
+    "test_df.parquet": "Full test DataFrame (35411 rows) with timestamps, turbine IDs, features, labels",
+    "metadata.json": "This file - human-readable manifest"
+  },
+  "models": {
+    "autoencoder": "SimpleAutoencoder (numpy, 27->64->32->8->32->64->27)",
+    "gmm": "GaussianMixture (sklearn, 3 components)",
+    "binary_clf": "GradientBoostingClassifier (sklearn, binary: Healthy vs Anomalous)",
+    "multi_clf": "RandomForestClassifier (sklearn, 3-class: Healthy/Pre-Fault/Fault)",
+    "lstm_models": "SimpleLSTM (numpy, 3 state-specific models, seq_length=24)"
+  },
+  "feature_names": [
+    "wtrm_avg_TrmTmp_Gbx",
+    "wtrm_avg_TrmTmp_GbxOil",
+    "wtrm_avg_TrmTmp_GbxBrg151",
+    "wtrm_avg_TrmTmp_GbxBrg152",
+    "wtrm_avg_TrmTmp_GbxBrg450",
+    "wtrm_avg_TrmTmp_GnBrgDE",
+    "wtrm_avg_TrmTmp_GnBrgNDE",
+    "wtrm_avg_Gbx_OilPres",
+    "wtrm_avg_Brg_OilPres",
+    "wgen_avg_GnTmp_phsA",
+    "wgen_avg_Spd",
+    "wnac_avg_WSpd1",
+    "wnac_avg_NacTmp",
+    "wgdc_avg_TriGri_PwrAt",
+    "wgdc_avg_TriGri_A",
+    "wtrm_sdv_TrmTmp_Gbx",
+    "wtrm_sdv_TrmTmp_GbxOil",
+    "wgen_sdv_Spd",
+    "thermal_stress_idx",
+    "bearing_stress_idx",
+    "power_efficiency",
+    "gbx_temp_trend",
+    "oil_pressure_ratio",
+    "bearing_temp_spread",
+    "gen_thermal_load",
+    "oil_temp_trend",
+    "variability_trend"
+  ],
+  "n_features": 27,
+  "failure_threshold": 0.39155506249200644,
+  "train_turbines": [
+    80,
+    81,
+    82
+  ],
+  "test_turbines": [
+    83,
+    84
+  ]
+}
