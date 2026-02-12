@@ -505,9 +505,19 @@ def run_pdm_inference(models_dict, n_samples=1000, sample_offset=0):
     # 1. Health Indicator
     hi = autoencoder.get_health_indicator(X_subset)
     
-    # 2. Health States
+    # 2. Health States (apply ordering map to raw GMM predictions)
     raw_states = gmm.predict(hi.reshape(-1, 1))
     states = np.array([state_order_map[s] for s in raw_states])
+    
+    # Verify state ordering (diagnostic)
+    if len(hi) > 0:
+        state_hi_means = {}
+        for state in [0, 1, 2]:
+            mask = states == state
+            if np.any(mask):
+                state_hi_means[state] = np.mean(hi[mask])
+        print(f"[PDM Inference] Mean HI per state: {state_hi_means}")
+        print(f"[PDM Inference] State order map used: {state_order_map}")
     
     # 3. Binary fault prediction
     binary_pred = binary_clf.predict(X_subset)
@@ -634,6 +644,35 @@ def display_pdm_results(pdm_results, models_dict):
     
     with tab2:
         st.markdown('#### Health State Distribution')
+        
+        # Add state ordering verification
+        st.markdown("**🔍 GMM State Ordering Verification:**")
+        state_labels_map = {0: 'Healthy', 1: 'Degrading', 2: 'Critical'}
+        verification_data = []
+        for state in [0, 1, 2]:
+            mask = pdm_results['health_states'] == state
+            if np.any(mask):
+                hi_in_state = pdm_results['health_indicator'][mask]
+                verification_data.append({
+                    'State': f"{state} ({state_labels_map[state]})",
+                    'Samples': int(np.sum(mask)),
+                    'HI Mean': f"{np.mean(hi_in_state):.4f}",
+                    'HI Min': f"{np.min(hi_in_state):.4f}",
+                    'HI Max': f"{np.max(hi_in_state):.4f}"
+                })
+        
+        if verification_data:
+            df_verify = pd.DataFrame(verification_data)
+            st.dataframe(df_verify, use_container_width=True, hide_index=True)
+            
+            # Check ordering
+            means = [float(row['HI Mean']) for row in verification_data]
+            if all(means[i] < means[i+1] for i in range(len(means)-1)):
+                st.success("✅ States correctly ordered: Healthy (low HI) → Degrading (medium HI) → Critical (high HI)")
+            else:
+                st.error("❌ States are NOT correctly ordered! Healthy should have lowest HI, Critical should have highest.")
+        
+        st.markdown("---")
         
         col1, col2 = st.columns([1, 1])
         
@@ -1390,8 +1429,9 @@ Estimated cost of planned maintenance: €50,000 - €150,000
 
 ---
 
-*This report was generated automatically by the Wind Turbine Predictive Maintenance System.*  
-*For questions or concerns, contact: maintenance@windfarm.com*
+*This report was generated automatically by the Wind Turbine Predictive Maintenance System developed by mandar.tabib, SINTEF Digital*  
+*For questions or concerns, contact: mandar.tabib@sintef.no*
+
 """
     
     return report
@@ -3225,13 +3265,8 @@ def optimize_multiple_turbine_pairs(turbine_pairs_data, power_agent, wake_agent,
                 print(f"  Skipping pair {idx+1}: Missing turbine IDs")
             continue
         
-        # Check if this pair is part of a chain
+        # Always treat as simple two-turbine pair (no chain merging)
         turbine_list = [upstream_id, downstream_id]
-        for chain in turbine_chains:
-            if upstream_id in chain and downstream_id in chain:
-                # Use the chain instead of just the pair
-                turbine_list = chain
-                break
         
         try:
             # Optimize this pair using the two-turbine optimizer
@@ -3270,10 +3305,8 @@ def optimize_multiple_turbine_pairs(turbine_pairs_data, power_agent, wake_agent,
                 'downstream_power_optimized': opt_result.get('optimal_downstream_power', 0.0)
             }
             
-            # If there are more turbines in the chain, assign 0 to others (aligned)
-            for turb_id in turbine_list:
-                if turb_id not in pair_result['optimal_yaw_angles']:
-                    pair_result['optimal_yaw_angles'][turb_id] = 0.0
+            # Simple pair - no need to assign additional turbines
+            # turbine_list always has exactly 2 turbines: [upstream_id, downstream_id]
             
             optimization_results.append(pair_result)
             total_power_gain += pair_result['power_gain_MW']
@@ -3911,12 +3944,12 @@ def create_velocity_slice_animation(predictions, output_path="wake_slice_animati
 # =============================================================================
 def main():
     # Header
-    st.markdown('<h1 class="main-header">🌀 Wind Turbine Multi-Agent Analysis System</h1>', 
+    st.markdown('<h1 class="main-header">🌀 Wind Turbine Multi-Agent AI Analysis System for Optimization and Predictive Maintenance</h1>', 
                 unsafe_allow_html=True)
     
     st.markdown('''
-    <p style="text-align: center; font-size: 1.0rem; color: #666; margin-top: -10px;">
-    📧  <b> Contact: mandar.tabib@sintef.no | ⚠️ <em>Currently being tested/developed</em></b>
+    <p style="text-align: center; font-size: 1.4rem; color: #666; margin-top: -10px;">
+    📧  <b> Contact: mandar.tabib@sintef.no , SINTEF Digital | ⚠️ <em>Currently being tested/developed</em></b>
     </p>
     ''', unsafe_allow_html=True)
     
@@ -3926,12 +3959,17 @@ def main():
     <b>Welcome!</b> This system involves developing/testing multiple agents involving AI to analyze wind turbine operations:
     <ul>
         <li><b>Agent 1:</b> Weather Station - Fetches real-time wind conditions</li>
-        <li><b>Agent 2:</b> Turbine Expert - Consults NREL 5MW manual for optimal yaw</li>
-        <li><b>Agent 2B:</b> LLM-based Turbine Expert - Uses local LLM for intelligent recommendations</li>
-        <li><b>Agent 2C:</b> Turbine Pair Selector - Uses LLM to identify critical turbine pairs for wake optimization</li>
-        <li><b>Agent 3:</b> Two-Turbine Wake Steering Optimizer - Finds optimal yaw misalignment for farm power maximization</li>
-        <li><b>Agent 4:</b> Wind Turbine Wake Flow ROM - Tensor Decomposition + Operator Inference model</li>
-        <li><b>Agent 5:</b> Wind Turbine Power Predictor - Gaussian Process Regressor trained at SINTEF</li>
+        <li><b>Agent 2:</b> Turbine Experts-  A rule-based expert and the Large Language Models.</li>
+         <ul>
+            <li>&emsp;<b>Agent 2A:</b> Symbolic Rule-based Turbine Expert - Uses predefined rules for turbine analysis</li>
+             <li>&emsp;<b>Agent 2B:</b> LLM-based Turbine Expert - Uses local LLM for intelligent recommendations</li>
+            <li>&emsp;<b>Agent 2C:</b> Turbine Pair Selector - Rule-based to identify critical turbine pairs for wake optimization</li>
+             <li>&emsp;<b>Agent 2D:</b> LLM Turbine Pair Selector - LLM to identify critical turbine pairs for wake optimization</li>
+        </ul>  
+        <li><b>Agent 3:</b> Optimizer Agent: Two-Turbine Wake Steering Optimizer - Finds optimal yaw misalignment for farm power maximization</li>
+        <li><b>Agent 4:</b> Flow AI Agent: Wind Turbine Flow ROM Agent - Unsupervised Tensor Train Decomposition + Operator Inference model at SINTEF Digital</li>
+        <li><b>Agent 5:</b> Power AI  - Gaussian Process Regressor trained at SINTEF Digital.</li>
+        <li><b>Agent 6:</b> Predictive Maintenance AI Agent - A Semi-Supervised Learning Model for Health Indicator and RUL involving Autoencoder , Gaussian Mixture Model and Recurrent Neural Network.</li>
     </ul>
     </div>
     """, unsafe_allow_html=True)
@@ -4162,7 +4200,7 @@ def main():
                     value=True,
                     help="Enable wake flow simulation using ROM"
                 )
-            
+
             enable_agent_5 = st.checkbox(
                 "⚡ Agent 5 (Power Predictor)",
                 value=True,
@@ -5995,11 +6033,51 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
                     results["optimal_nacelle_downstream"] = yaw_misalignment_to_nacelle_direction(downstream_misalign)
                     results["actual_yaw_downstream"] = wind_dir + downstream_misalign
                     results["optimal_downstream_misalignment"] = downstream_misalign
-                
-                st.info(f"ℹ️ Using Pair 1 (Turbines {' → '.join([f'T{tid}' for tid in turbine_ids])}) for downstream wake simulation (Agent 4)")
         
         else:
             st.warning("⚠️ Optimization completed but no results available.")
+    
+    # =========================================================================
+    # Analysis Summary Report (after optimizer, before demonstrators)
+    # =========================================================================
+    st.markdown("---")
+    st.markdown("### 📊 Analysis Summary Report")
+    st.markdown("*Summary of wind farm analysis based on optimizer results (Agents 1-3)*")
+    
+    display_summary_report(results)
+    
+    # =========================================================================
+    # Chatbot Interface for Analysis Questions
+    # =========================================================================
+    st.markdown("---")
+    st.markdown("### 🤖 Ask Questions About the Analysis")
+    st.markdown("*Use the chatbot to ask questions about the optimization results and recommendations*")
+    
+    display_analysis_chatbot(results)
+    
+    # =========================================================================
+    # Optional Demonstrations (Agent 4 & Agent 5)
+    # =========================================================================
+    st.markdown("---")
+    st.markdown("""
+    <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 2rem; border-radius: 10px; margin: 2rem 0;'>
+        <h2 style='color: white; text-align: center; margin-bottom: 1rem;'>🎯 Optional Demonstrators</h2>
+        <p style='color: white; text-align: center; font-size: 1.1rem;'>
+            The following agents demonstrate wake flow simulation and power prediction<br>
+            using the <b>recommended yaw angles</b> from the optimizer above.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Store indicator that we're entering demonstrator mode
+    if "optimizer" in results and results["optimizer"] is not None:
+        opt_results = results["optimizer"]
+        if opt_results.get('status') == 'success' and 'optimization_results' in opt_results:
+            optimization_data = opt_results['optimization_results']
+            first_pair = optimization_data[0]
+            turbine_ids = first_pair['turbine_ids']
+            optimal_yaws = first_pair['optimal_yaw_angles']
+            st.info(f"ℹ️ Using Pair 1 (Turbines {' → '.join([f'T{tid}' for tid in turbine_ids])}) for demonstrations with recommended yaw misalignment")
     
     # Arrow from Agent 3 to Agent 4
     st.markdown('''
@@ -6277,45 +6355,170 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
     # Store results
     st.session_state.results = results
     st.session_state.analysis_complete = True
+
+
+def display_analysis_chatbot(results):
+    """Display an interactive chatbot for asking questions about the analysis."""
     
-    # =========================================================================
-    # Summary Report
-    # =========================================================================
+    # Initialize chat history in session state
+    if 'analysis_chat_history' not in st.session_state:
+        st.session_state.analysis_chat_history = []
+    
+    # Get analysis context
+    weather = results.get("weather", {})
+    expert = results.get("expert", {})
+    optimizer = results.get("optimizer", {})
+    turbine_pairs = results.get("turbine_pairs", {})
+    
+    # Build context for LLM
+    wind_speed = weather.get('wind_speed_ms', 0)
+    wind_dir = weather.get('wind_direction_deg', 0)
+    operating_region = expert.get('operating_region', 'N/A')
+    
+    context = f"""You are an expert wind farm analyst. Answer questions about the following wind farm analysis:
+
+WEATHER CONDITIONS:
+- Wind Speed: {wind_speed:.1f} m/s
+- Wind Direction: {wind_dir:.0f}°
+- Temperature: {weather.get('temperature_c', 0):.1f}°C
+
+TURBINE:
+- Type: NREL 5MW Reference Wind Turbine
+- Operating Region: {operating_region}
+
+"""
+    
+    if optimizer:
+        opt_method = optimizer.get('optimization_method', 'N/A')
+        num_pairs = optimizer.get('num_pairs_optimized', 0)
+        total_gain = optimizer.get('total_power_gain', 0)
+        
+        context += f"""OPTIMIZATION RESULTS:
+- Method: {opt_method}
+- Number of Pairs Optimized: {num_pairs}
+- Total Power Gain: {total_gain:.4f} MW
+
+"""
+        
+        if 'optimization_results' in optimizer:
+            context += "PAIR-BY-PAIR RESULTS:\n"
+            for result in optimizer['optimization_results']:
+                upstream_id = result.get('upstream_id', result['turbine_ids'][0])
+                downstream_id = result.get('downstream_id', result['turbine_ids'][1])
+                upstream_yaw = result['optimal_yaw_angles'].get(upstream_id, 0.0)
+                power_gain = result['power_gain_MW']
+                gain_pct = result['power_gain_percent']
+                
+                context += f"""  Pair {result['pair_index']}: T{upstream_id} → T{downstream_id}
+    - Upstream Yaw Misalignment: {upstream_yaw:.1f}°
+    - Power Gain: {power_gain:.4f} MW ({gain_pct:+.2f}%)
+"""
+    
+    # Suggested questions
+    st.markdown("**💡 Suggested Questions:**")
+    suggested_questions = [
+        "What is the recommended wake steering strategy?",
+        "Why does wake steering improve total farm power?",
+        "How do the wind conditions affect the optimization?",
+        "What are the trade-offs for each turbine pair?",
+        "How much power gain can we expect?",
+        "What happens if we don't apply wake steering?"
+    ]
+    
+    # Display suggested questions as clickable buttons
+    cols = st.columns(3)
+    for i, question in enumerate(suggested_questions):
+        with cols[i % 3]:
+            if st.button(question, key=f"suggest_{i}", use_container_width=True):
+                st.session_state.analysis_chat_history.append({
+                    "role": "user",
+                    "content": question
+                })
+                # Generate response
+                with st.spinner("🤔 Thinking..."):
+                    response = query_local_llm(
+                        api_key=st.session_state.get('api_key', ''),
+                        api_base=st.session_state.get('api_base', ''),
+                        model_name=st.session_state.get('selected_model', ''),
+                        prompt=question,
+                        system_message=context,
+                        temperature=0.7,
+                        max_tokens=500
+                    )
+                    st.session_state.analysis_chat_history.append({
+                        "role": "assistant",
+                        "content": response
+                    })
+                st.rerun()
+    
     st.markdown("---")
-    st.markdown("### 📊 Analysis Summary Report")
     
-    display_summary_report(results)
+    # Display chat history
+    for message in st.session_state.analysis_chat_history:
+        if message["role"] == "user":
+            st.markdown(f"**👤 You:** {message['content']}")
+        else:
+            st.markdown(f"**🤖 Assistant:** {message['content']}")
+        st.markdown("")
+    
+    # Chat input
+    user_question = st.text_input(
+        "Ask a question about the analysis:",
+        key="user_analysis_question",
+        placeholder="e.g., Why is the power gain positive?"
+    )
+    
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        ask_button = st.button("Ask", type="primary")
+    with col2:
+        if st.button("Clear Chat"):
+            st.session_state.analysis_chat_history = []
+            st.rerun()
+    
+    if ask_button and user_question:
+        # Add user question to history
+        st.session_state.analysis_chat_history.append({
+            "role": "user",
+            "content": user_question
+        })
+        
+        # Generate response
+        with st.spinner("🤔 Thinking..."):
+            try:
+                response = query_local_llm(
+                    api_key=st.session_state.get('api_key', ''),
+                    api_base=st.session_state.get('api_base', ''),
+                    model_name=st.session_state.get('selected_model', ''),
+                    prompt=user_question,
+                    system_message=context,
+                    temperature=0.7,
+                    max_tokens=500
+                )
+                st.session_state.analysis_chat_history.append({
+                    "role": "assistant",
+                    "content": response
+                })
+            except Exception as e:
+                st.session_state.analysis_chat_history.append({
+                    "role": "assistant",
+                    "content": f"Error: {str(e)}"
+                })
+        
+        st.rerun()
 
 
 def display_summary_report(results):
-    """Display a summary report of the analysis."""
+    """Display a summary report of the analysis (Agents 1-3, excluding demonstrators)."""
     
     weather = results.get("weather", {})
     expert = results.get("expert", {})
-    power = results.get("power", {})
-    wake = results.get("wake", {})
     optimizer = results.get("optimizer", {})
     
     # Get wind direction for actual yaw calculation
     wind_dir = weather.get('wind_direction_deg', 270)
     
-    # Use optimizer results for recommended yaw if available
-    if optimizer:
-        opt_upstream = optimizer.get('optimal_upstream_misalignment', 0)
-        opt_downstream = optimizer.get('optimal_downstream_misalignment', 0)
-        opt_method = optimizer.get('optimization_method', 'N/A')
-        power_gain = optimizer.get('power_gain_percent', 0)
-        # Calculate actual yaw angles: wind_direction + misalignment
-        actual_yaw_T1 = wind_dir + opt_upstream
-        actual_yaw_T2 = wind_dir + opt_downstream
-        # Report both misalignment and actual yaw
-        recommended_yaw_str = f"T1: {opt_upstream:.1f}° → {actual_yaw_T1:.0f}°, T2: {opt_downstream:.1f}° → {actual_yaw_T2:.0f}° (via {opt_method})"
-    else:
-        recommended_yaw_str = f"{expert.get('suggested_yaw', 0):.1f}°"
-        power_gain = 0
-        actual_yaw_T1 = wind_dir
-        actual_yaw_T2 = wind_dir
-    
+    # Basic info
     report_md = f"""
 | Parameter | Value |
 |-----------|-------|
@@ -6323,17 +6526,84 @@ def display_summary_report(results):
 | **Timestamp** | {results.get('timestamp', 'N/A')} |
 | **Wind Speed** | {weather.get('wind_speed_ms', 0):.1f} m/s |
 | **Wind Direction** | {weather.get('wind_direction_deg', 0):.0f}° |
-| **Optimal Yaw (Misalign → Actual)** | {recommended_yaw_str} |
-| **Farm Power Gain** | {power_gain:+.1f}% |
 | **Operating Region** | {expert.get('operating_region', 'N/A')} |
-| **Predicted Power** | {power.get('mean_MW', 0):.3f} ± {power.get('uncertainty_MW', 0):.3f} MW |
-| **Wake Field Points** | {wake.get('shape', [0,0,0])[1] if wake else 'N/A':,} |
-| **Simulation Steps** | {wake.get('shape', [0,0,0])[0] if wake else 'N/A'} |
-
-*Note: Actual Yaw = Wind Direction + Yaw Misalignment (ML model input 270°-285° is proxy for misalignment 0°-15°)*
 """
     
     st.markdown(report_md)
+    
+    # Display optimizer results table if available
+    if optimizer and optimizer.get('status') == 'success':
+        if 'optimization_results' in optimizer:
+            # Multi-pair format
+            st.markdown("#### Wake Steering Optimization Results")
+            st.markdown(f"**Method:** {optimizer.get('optimization_method', 'N/A')}")
+            
+            opt_results = optimizer['optimization_results']
+            
+            # Create summary table
+            table_rows = []
+            for result in opt_results:
+                upstream_id = result.get('upstream_id', result['turbine_ids'][0] if result['turbine_ids'] else 'N/A')
+                downstream_id = result.get('downstream_id', result['turbine_ids'][1] if len(result['turbine_ids']) > 1 else 'N/A')
+                upstream_yaw = result.get('upstream_yaw', result['optimal_yaw_angles'].get(upstream_id, 0.0))
+                downstream_yaw = result.get('downstream_yaw', result['optimal_yaw_angles'].get(downstream_id, 0.0))
+                
+                table_rows.append(f"| Pair {result['pair_index']} | T{upstream_id} | {upstream_yaw:.1f}° | T{downstream_id} | {downstream_yaw:.1f}° | {result['power_gain_MW']:+.4f} MW | {result['power_gain_percent']:+.2f}% |")
+            
+            table_md = """| Pair # | Upstream Turbine | Upstream Yaw | Downstream Turbine | Downstream Yaw | Power Gain | Gain % |
+|--------|------------------|--------------|--------------------|--------------------|------------|--------|
+"""
+            table_md += "\n".join(table_rows)
+            
+            st.markdown(table_md)
+            
+            # Overall summary
+            st.markdown("**Overall Summary:**")
+            total_gain_mw = optimizer.get('total_power_gain', 0)
+            num_pairs = optimizer.get('num_pairs_optimized', 0)
+            avg_gain = total_gain_mw / num_pairs if num_pairs > 0 else 0
+            
+            summary_cols = st.columns(3)
+            with summary_cols[0]:
+                st.metric("Pairs Optimized", num_pairs)
+            with summary_cols[1]:
+                st.metric("Total Power Gain", f"{total_gain_mw:.4f} MW")
+            with summary_cols[2]:
+                st.metric("Avg Gain per Pair", f"{avg_gain:.4f} MW")
+        else:
+            # Legacy single-pair format
+            st.markdown("#### Wake Steering Optimization Results")
+            st.markdown(f"**Method:** {optimizer.get('optimization_method', 'N/A')}")
+            
+            total_gain_mw = optimizer.get('power_gain_MW', 0)
+            gain_pct = optimizer.get('power_gain_percent', 0)
+            
+            # Create simple table
+            opt_up_misalign = optimizer.get('optimal_upstream_misalignment', 0)
+            opt_down_misalign = optimizer.get('optimal_downstream_misalignment', 0)
+            actual_yaw_T1 = wind_dir + opt_up_misalign
+            actual_yaw_T2 = wind_dir + opt_down_misalign
+            
+            table_md = f"""| Turbine | Role | Yaw Misalignment | Actual Yaw Angle | Power Output |
+|---------|------------|------------------|------------------|---------------|
+| T1 | Upstream | {opt_up_misalign:.1f}° | {actual_yaw_T1:.1f}° | {optimizer.get('optimal_upstream_power', 0):.3f} MW |
+| T2 | Downstream | {opt_down_misalign:.1f}° | {actual_yaw_T2:.1f}° | {optimizer.get('optimal_downstream_power', 0):.3f} MW |
+"""
+            st.markdown(table_md)
+            
+            # Overall summary
+            st.markdown("**Overall Summary:**")
+            summary_cols = st.columns(3)
+            with summary_cols[0]:
+                st.metric("Baseline Power", f"{optimizer.get('baseline_total_power', 0):.3f} MW")
+            with summary_cols[1]:
+                st.metric("Optimized Power", f"{optimizer.get('optimal_total_power', 0):.3f} MW")
+            with summary_cols[2]:
+                st.metric("Net Power Gain", f"{total_gain_mw:.4f} MW", delta=f"{gain_pct:+.2f}%")
+    
+    st.markdown("*Note: Summary based on Agents 1-3 (Weather, Expert, Optimizer). Wake flow and power predictions are optional demonstrators below.*")
+    
+    # Export button
     
     # Export button
     if st.button("📄 Export Full Report"):
@@ -6347,58 +6617,66 @@ def display_summary_report(results):
             
             # Handle both single-pair and multi-pair optimization results
             if 'optimization_results' in optimizer:
-                # Multi-pair format
+                # Multi-pair format - clean table summary
+                opt_results = optimizer['optimization_results']
+                total_gain_mw = optimizer.get('total_power_gain', 0)
+                num_pairs = optimizer.get('num_pairs_optimized', 0)
+                avg_gain = total_gain_mw / num_pairs if num_pairs > 0 else 0
+                
                 optimizer_section = f"""
-WAKE STEERING OPTIMIZATION
---------------------------
+WAKE STEERING OPTIMIZATION SUMMARY
+----------------------------------
 Optimization Method: {optimizer.get('optimization_method', 'N/A')}
-Number of Pairs Optimized: {optimizer.get('num_pairs_optimized', 0)}
-Total Power Gain: {optimizer.get('total_power_gain', 0):.4f} MW
+Number of Pairs Optimized: {num_pairs}
+Total Power Gain: {total_gain_mw:.4f} MW
+Average Gain per Pair: {avg_gain:.4f} MW
 
-Note: Actual Yaw = Wind Direction + Yaw Misalignment
-      (ML model input 270°-285° is a proxy for misalignment 0°-15°)
+Optimization Results Table:
+------------------------------------------------------------------------------------------
+| Pair # | Upstream    | Upstream Yaw | Downstream  | Downstream Yaw | Power Gain     |
+|--------|-------------|--------------|-------------|----------------|----------------|
+"""
+                for result in opt_results:
+                    upstream_id = result.get('upstream_id', result['turbine_ids'][0] if result['turbine_ids'] else 'N/A')
+                    downstream_id = result.get('downstream_id', result['turbine_ids'][1] if len(result['turbine_ids']) > 1 else 'N/A')
+                    upstream_yaw = result.get('upstream_yaw', result['optimal_yaw_angles'].get(upstream_id, 0.0))
+                    downstream_yaw = result.get('downstream_yaw', result['optimal_yaw_angles'].get(downstream_id, 0.0))
+                    
+                    optimizer_section += f"| {result['pair_index']:6d} | T{upstream_id:10s} | {upstream_yaw:11.1f}° | T{downstream_id:10s} | {downstream_yaw:13.1f}° | {result['power_gain_MW']:+.4f} MW ({result['power_gain_percent']:+.2f}%) |\n"
+                
+                optimizer_section += f"""
+------------------------------------------------------------------------------------------
 
-"""
-                for result in optimizer['optimization_results']:
-                    optimizer_section += f"""
-Pair {result['pair_index']}: Turbines {' → '.join([f"T{tid}" for tid in result['turbine_ids']])}
-"""
-                    for turb_id in result['turbine_ids']:
-                        yaw_misalign = result['optimal_yaw_angles'].get(turb_id, 0.0)
-                        actual_yaw = wind_dir + yaw_misalign
-                        optimizer_section += f"""  Turbine T{turb_id}:
-    - Yaw Misalignment: {yaw_misalign:.1f}°
-    - Actual Yaw Angle: {actual_yaw:.1f}° (= {wind_dir:.0f}° + {yaw_misalign:.1f}°)
-"""
-                    optimizer_section += f"""  Power Gain: {result['power_gain_MW']:.4f} MW ({result['power_gain_percent']:+.2f}%)
-  Baseline: {result.get('baseline_power', 0):.4f} MW → Optimized: {result.get('optimized_power', 0):.4f} MW
+Note: Upstream yaw values are optimized for wake steering.
+      Downstream yaw values are physics-based wake alignment.
+      Actual Yaw Angle = Wind Direction ({wind_dir:.0f}°) + Yaw Misalignment
 """
             else:
-                # Legacy single-pair format
+                # Legacy single-pair format - clean table summary
+                total_gain_mw = optimizer.get('power_gain_MW', 0)
+                gain_pct = optimizer.get('power_gain_percent', 0)
+                
                 optimizer_section = f"""
-WAKE STEERING OPTIMIZATION
---------------------------
+WAKE STEERING OPTIMIZATION SUMMARY
+----------------------------------
 Optimization Method: {optimizer.get('optimization_method', 'N/A')}
+Number of Pairs Optimized: 1
+Total Power Gain: {total_gain_mw:.4f} MW ({gain_pct:+.2f}%)
 
-Note: Actual Yaw = Wind Direction + Yaw Misalignment
-      (ML model input 270°-285° is a proxy for misalignment 0°-15°)
-
-Upstream Turbine (T1):
-  - Optimal Yaw Misalignment: {opt_up_misalign:.1f}°
-  - Actual Yaw Angle: {actual_yaw_T1_export:.1f}° (= {wind_dir:.0f}° + {opt_up_misalign:.1f}°)
-  - ML Model Input (Nacelle Dir): {optimizer.get('optimal_upstream_nacelle', 0):.1f}°
-  - Power Output: {optimizer.get('optimal_upstream_power', 0):.3f} MW
-
-Downstream Turbine (T2):
-  - Optimal Yaw Misalignment: {opt_down_misalign:.1f}°
-  - Actual Yaw Angle: {actual_yaw_T2_export:.1f}° (= {wind_dir:.0f}° + {opt_down_misalign:.1f}°)
-  - ML Model Input (Nacelle Dir): {optimizer.get('optimal_downstream_nacelle', 0):.1f}°
-  - Power Output: {optimizer.get('optimal_downstream_power', 0):.3f} MW
+Optimization Results:
+------------------------------------------------------------------------------------------
+| Turbine | Role       | Yaw Misalignment | Actual Yaw Angle       | Power Output     |
+|---------|------------|------------------|------------------------|------------------|
+| T1      | Upstream   | {opt_up_misalign:15.1f}° | {actual_yaw_T1_export:21.1f}° | {optimizer.get('optimal_upstream_power', 0):15.3f} MW |
+| T2      | Downstream | {opt_down_misalign:15.1f}° | {actual_yaw_T2_export:21.1f}° | {optimizer.get('optimal_downstream_power', 0):15.3f} MW |
+------------------------------------------------------------------------------------------
 
 Total Farm Power:
-  - Baseline (0° misalign): {optimizer.get('baseline_total_power', 0):.3f} MW
-  - Optimized: {optimizer.get('optimal_total_power', 0):.3f} MW
-  - Power Gain: {optimizer.get('power_gain_MW', 0):.3f} MW ({optimizer.get('power_gain_percent', 0):+.1f}%)
+  - Baseline (no wake steering): {optimizer.get('baseline_total_power', 0):.3f} MW
+  - Optimized (with wake steering): {optimizer.get('optimal_total_power', 0):.3f} MW
+  - Net Power Gain: {total_gain_mw:.4f} MW ({gain_pct:+.2f}%)
+
+Note: Actual Yaw Angle = Wind Direction ({wind_dir:.0f}°) + Yaw Misalignment
 """
         else:
             optimizer_section = ""
@@ -6438,37 +6716,29 @@ WIND TURBINE MULTI-AGENT ANALYSIS REPORT
 Generated: {results.get('timestamp', 'N/A')}
 Location: {results.get('location', 'N/A')}
 
-WEATHER CONDITIONS
-------------------
+WEATHER CONDITIONS (Agent 1)
+----------------------------
 Wind Speed: {weather.get('wind_speed_ms', 0):.1f} m/s
 Wind Direction: {weather.get('wind_direction_deg', 0):.0f}°
 Temperature: {weather.get('temperature_c', 0):.1f}°C
 Data Source: {weather.get('data_source', 'N/A')}
 
-EXPERT RECOMMENDATION
----------------------
+EXPERT RECOMMENDATION (Agent 2A/2B)
+------------------------------------
 Turbine: NREL 5MW Reference Wind Turbine
 Operating Region: {expert.get('operating_region', 'N/A')}
 Real-World Yaw (aligned): {expert.get('actual_yaw', 0):.1f}°
 Expected Efficiency: {expert.get('expected_efficiency', 0)*100:.1f}%
 {optimizer_section}
-TURBINE PAIR ANALYSIS (Agent 2C)
---------------------------------
+TURBINE PAIR ANALYSIS (Agent 2C/2D)
+------------------------------------
 {turbine_pair_section}
-POWER PREDICTION (SINTEF ML Model)
-----------------------------------
-Mean Power Output: {power.get('mean_MW', 0):.3f} MW
-Uncertainty (±1σ): ±{power.get('uncertainty_MW', 0):.3f} MW
-
-WAKE FLOW SIMULATION (TT-OpInf)
--------------------------------
-Spatial Points: {wake.get('shape', [0,0,0])[1] if wake else 'N/A'}
-Time Steps: {wake.get('shape', [0,0,0])[0] if wake else 'N/A'}
-Velocity Components: 3 (Ux, Uy, Uz)
-
 ========================================
 Report generated by Wind Turbine Multi-Agent System
-Developed at SINTEF Energy Research
+Developed at SINTEF Digital by mandar.tabib.
+
+Note: This report includes results from Agents 1-3 (Weather, Expert, Optimizer).
+      Wake flow (Agent 4) and power predictions (Agent 5) are optional demonstrators.
 """
         st.download_button(
             label="Download Report (TXT)",

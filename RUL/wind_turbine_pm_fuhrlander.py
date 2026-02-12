@@ -499,12 +499,20 @@ def classify_health_states(health_indicator, n_states=3):
     probs = gmm.predict_proba(HI)
 
     # Sort states: 0=healthy (low HI), 2=critical (high HI)
+    # Create mapping from raw GMM cluster IDs to ordered state IDs
     state_means = np.array([HI[states == i].mean() for i in range(n_states)])
     state_order = np.argsort(state_means)
-    mapping = {old: new for new, old in enumerate(state_order)}
-    states = np.array([mapping[s] for s in states])
-
-    return states, gmm, probs
+    state_order_map = {int(old): int(new) for new, old in enumerate(state_order)}
+    
+    # Apply mapping to get sorted states
+    sorted_states = np.array([state_order_map[s] for s in states])
+    
+    # Print diagnostic info
+    print(f"  GMM Cluster Centers (raw): {gmm.means_.flatten()}")
+    print(f"  Mean HI per raw cluster: {state_means}")
+    print(f"  State ordering (raw→sorted): {state_order_map}")
+    
+    return sorted_states, gmm, probs, state_order_map
 
 
 # ============================================================================
@@ -901,14 +909,12 @@ def main():
     print("STAGE 2: GMM HEALTH STATE CLASSIFICATION")
     print("="*90)
 
-    train_states, gmm, _ = classify_health_states(train_hi)
-
-    # Build state ordering map: 0=lowest mean HI (healthy), 2=highest (critical)
-    state_means = np.array([train_hi[train_states == i].mean() for i in range(3)])
-    state_order = np.argsort(state_means)
-    state_order_map = {int(old): int(new) for new, old in enumerate(state_order)}
-    test_states = np.array([state_order_map[s]
-                            for s in gmm.predict(test_hi.reshape(-1, 1))])
+    # Get sorted states and the ordering map from training data
+    train_states, gmm, _, state_order_map = classify_health_states(train_hi)
+    
+    # Apply the same mapping to test data
+    test_raw_states = gmm.predict(test_hi.reshape(-1, 1))
+    test_states = np.array([state_order_map[s] for s in test_raw_states])
 
     state_names = {0: 'HEALTHY', 1: 'DEGRADING', 2: 'CRITICAL'}
     for state in range(3):
