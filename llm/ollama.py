@@ -33,9 +33,10 @@ class OllamaLLM(BaseLLM):
         prompt: str, 
         system: Optional[str] = None,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        retries: int = 3
     ) -> str:
-        """Generate completion using Ollama API."""
+        """Generate completion using Ollama API with retry logic."""
         
         # Use config defaults if not provided
         temperature = temperature if temperature is not None else self.default_temperature
@@ -43,29 +44,25 @@ class OllamaLLM(BaseLLM):
         
         messages = []
         if system:
-            messages.append({"role": "system", "content": system})
+            messages.append({"role": "system", "content": "You are an expert in predictive maintenance. Answer the following question in detail."})
         messages.append({"role": "user", "content": prompt})
         
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens,
-            }
-        }
-        
-        timeout_config = httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0)
-        async with httpx.AsyncClient(timeout=timeout_config) as client:
-            response = await client.post(
-                f"{self.base_url}/api/chat",
-                json=payload
-            )
-            response.raise_for_status()
-            result = response.json()
-        
-        return result["message"]["content"]
+        for attempt in range(retries):
+            try:
+                payload = {
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": False,
+                    "options": {
+                        "temperature": temperature,
+                        "max_tokens": max_tokens
+                    }
+                }
+                response = await self.client.post("/completions", json=payload)
+                return response.json()["choices"][0]["message"]["content"]
+            except Exception as e:
+                if attempt == retries - 1:
+                    raise e
     
     async def list_models(self) -> list[str]:
         """List available models in Ollama."""

@@ -47,9 +47,10 @@ class OpenAILLM(BaseLLM):
         prompt: str, 
         system: Optional[str] = None,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        retries: int = 3
     ) -> str:
-        """Generate completion using GPT."""
+        """Generate completion using GPT with retry logic."""
         
         # Use config defaults if not provided
         temperature = temperature if temperature is not None else self.default_temperature
@@ -57,14 +58,18 @@ class OpenAILLM(BaseLLM):
         
         messages = []
         if system:
-            messages.append({"role": "system", "content": system})
+            messages.append({"role": "system", "content": "You are an expert in predictive maintenance. Answer the following question in detail."})
         messages.append({"role": "user", "content": prompt})
         
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        
-        return response.choices[0].message.content
+        for attempt in range(retries):
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                return response["choices"][0]["message"]["content"]
+            except Exception as e:
+                if attempt == retries - 1:
+                    raise e

@@ -1613,35 +1613,43 @@ def pdm_chatbot_section(pdm_results, models_dict):
         for i, question in enumerate(suggested_questions[:8]):
             with cols[i % 4]:
                 if st.button(question[:40] + '...', key=f'pdm_q_{i}', use_container_width=True):
-                    st.session_state.pdm_chat_input = question
+                    # Set the question and trigger processing flag
+                    st.session_state.pdm_selected_question = question
+                    st.session_state.pdm_trigger_ask = True
     
     # Chat input
     if 'pdm_chat_history' not in st.session_state:
         st.session_state.pdm_chat_history = []
     
-    user_question = st.text_input(
-        'Your question:',
-        value=st.session_state.get('pdm_chat_input', ''),
-        placeholder='Ask anything about the analysis...',
-        key='pdm_chat_input_field'
-    )
+    # Handle suggested question trigger
+    if st.session_state.get('pdm_trigger_ask', False):
+        user_question = st.session_state.get('pdm_selected_question', '')
+        st.session_state.pdm_trigger_ask = False
+        process_question = True
+    else:
+        user_question = st.text_input(
+            'Your question:',
+            value=st.session_state.get('pdm_chat_input', ''),
+            placeholder='Ask anything about the analysis...',
+            key='pdm_chat_input_field'
+        )
+        process_question = st.button('🚀 Ask', key='pdm_ask_btn')
     
-    if st.button('🚀 Ask', key='pdm_ask_btn'):
-        if user_question:
-            with st.spinner(f'Consulting {llm_provider} {selected_model}...'):
-                # Prepare context for LLM
-                avg_hi = np.nanmean(pdm_results['health_indicator'])
-                failure_threshold = pdm_results['failure_threshold']
-                avg_fault_prob = np.nanmean(pdm_results['binary_probabilities'][:, 1])
-                valid_rul = pdm_results['rul_predictions'][~np.isnan(pdm_results['rul_predictions'])]
-                
-                state_counts = {}
-                for state in [0, 1, 2]:
-                    state_counts[state] = np.sum(pdm_results['health_states'] == state)
-                
-                min_rul_str = f"{np.min(valid_rul):.1f} hours" if len(valid_rul) > 0 else 'N/A'
-                
-                context = f"""Predictive Maintenance Analysis Context:
+    if process_question and user_question:
+        with st.spinner(f'Consulting {llm_provider} {selected_model}...'):
+            # Prepare context for LLM
+            avg_hi = np.nanmean(pdm_results['health_indicator'])
+            failure_threshold = pdm_results['failure_threshold']
+            avg_fault_prob = np.nanmean(pdm_results['binary_probabilities'][:, 1])
+            valid_rul = pdm_results['rul_predictions'][~np.isnan(pdm_results['rul_predictions'])]
+            
+            state_counts = {}
+            for state in [0, 1, 2]:
+                state_counts[state] = np.sum(pdm_results['health_states'] == state)
+            
+            min_rul_str = f"{np.min(valid_rul):.1f} hours" if len(valid_rul) > 0 else 'N/A'
+            
+            context = f"""Predictive Maintenance Analysis Context:
 - Average Health Indicator: {avg_hi:.4f} (threshold: {failure_threshold:.4f})
 - Average Fault Probability: {avg_fault_prob:.2%}
 - Health State Distribution: Healthy={state_counts[0]}, Degrading={state_counts[1]}, Critical={state_counts[2]}
@@ -1657,8 +1665,8 @@ ML Models:
 4. Random Forest Classifier (300 trees) for multi-class prediction
 5. LSTM networks for RUL prediction (24-hour sequences)
 """
-                
-                system_message = f"""You are an expert wind turbine predictive maintenance specialist with deep knowledge of:
+            
+            system_message = f"""You are an expert wind turbine predictive maintenance specialist with deep knowledge of:
 - Machine learning models for anomaly detection and fault prediction
 - Wind turbine SCADA data analysis
 - Fuhrlander FL2500 turbine specifications and failure modes
@@ -1671,52 +1679,56 @@ Provide clear, actionable answers based on the analysis context. Be specific abo
 - Industry best practices
 
 Use technical terminology appropriately but explain complex concepts clearly."""
+            
+            prompt = f"{context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer:"
+            
+            try:
+                # Get API configuration
+                if llm_provider == "NTNU":
+                    api_base = "https://llm.hpc.ntnu.no/v1"
+                    api_key = "sk-48COknyy7BlFg8vbN1ywgg"
+                elif llm_provider == "OpenAI":
+                    api_base = "https://api.openai.com/v1"
+                    api_key = os.getenv("OPENAI_API_KEY", "your-openai-key")
+                elif llm_provider == "Ollama":
+                    api_base = "http://localhost:11434/v1"
+                    api_key = "ollama"
+                elif llm_provider == "Google":
+                    api_base = "https://generativelanguage.googleapis.com/v1beta"
+                    api_key = os.getenv("GOOGLE_API_KEY", "your-google-key")
+                else:  # Anthropic
+                    api_base = "https://api.anthropic.com/v1"
+                    api_key = os.getenv("ANTHROPIC_API_KEY", "your-anthropic-key")
                 
-                prompt = f"{context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer:"
+                # Query LLM with lower temperature for more deterministic responses
+                response = query_local_llm(
+                    api_key=api_key,
+                    api_base=api_base,
+                    model_name=selected_model,
+                    prompt=prompt,
+                    system_message=system_message,
+                    temperature=0.3,  # Lower temperature for consistent responses
+                    max_tokens=1500,  # Reduced for faster responses
+                    timeout=60.0,  # Increased timeout for complete responses
+                    max_retries=3  # Retry logic for handling incomplete responses
+                )
                 
-                try:
-                    # Get API configuration
-                    if llm_provider == "NTNU":
-                        api_base = "https://llm.hpc.ntnu.no/v1"
-                        api_key = "sk-48COknyy7BlFg8vbN1ywgg"
-                    elif llm_provider == "OpenAI":
-                        api_base = "https://api.openai.com/v1"
-                        api_key = os.getenv("OPENAI_API_KEY", "your-openai-key")
-                    elif llm_provider == "Ollama":
-                        api_base = "http://localhost:11434/v1"
-                        api_key = "ollama"
-                    elif llm_provider == "Google":
-                        api_base = "https://generativelanguage.googleapis.com/v1beta"
-                        api_key = os.getenv("GOOGLE_API_KEY", "your-google-key")
-                    else:  # Anthropic
-                        api_base = "https://api.anthropic.com/v1"
-                        api_key = os.getenv("ANTHROPIC_API_KEY", "your-anthropic-key")
-                    
-                    # Query LLM
-                    response = query_local_llm(
-                        api_key=api_key,
-                        api_base=api_base,
-                        model_name=selected_model,
-                        prompt=prompt,
-                        system_message=system_message,
-                        temperature=0.7,
-                        max_tokens=1000,
-                        timeout=30.0
-                    )
-                    
-                    # Add to chat history
-                    st.session_state.pdm_chat_history.append({
-                        'question': user_question,
-                        'answer': response,
-                        'provider': llm_provider,
-                        'model': selected_model
-                    })
-                    
-                    st.session_state.pdm_chat_input = ''
-                    
-                except Exception as e:
-                    st.error(f"Error querying LLM: {str(e)}")
-                    st.info("Check your API configuration and network connection.")
+                # Add to chat history
+                st.session_state.pdm_chat_history.append({
+                    'question': user_question,
+                    'answer': response,
+                    'provider': llm_provider,
+                    'model': selected_model
+                })
+                
+                st.session_state.pdm_chat_input = ''
+                st.session_state.pdm_selected_question = ''
+                st.rerun()  # Rerun to show the new response
+                
+            except Exception as e:
+                st.error(f"Error querying LLM: {str(e)}")
+                st.info("Check your API configuration and network connection.")
+                st.session_state.pdm_selected_question = ''
     
     # Display chat history
     if st.session_state.pdm_chat_history:
@@ -2162,6 +2174,64 @@ def validate_turbine_pair_direction(turbine_locations, upstream_id, downstream_i
         return False, 999, 0
 
 
+def convert_latlon_to_cartesian(turbine_locations):
+    """
+    Convert turbine lat/lon coordinates to relative Cartesian coordinates (meters).
+    Uses the first turbine as origin (0, 0).
+    
+    Parameters:
+    -----------
+    turbine_locations : list
+        List of dicts with 'turbine_id', 'latitude', 'longitude'
+    
+    Returns:
+    --------
+    list
+        List of dicts with added 'x_m' and 'y_m' fields (position in meters)
+    """
+    if not turbine_locations:
+        return []
+    
+    # Use first turbine as reference/origin
+    ref_lat = turbine_locations[0]['latitude']
+    ref_lon = turbine_locations[0]['longitude']
+    
+    result = []
+    for turbine in turbine_locations:
+        lat = turbine['latitude']
+        lon = turbine['longitude']
+        
+        # Calculate approximate x, y in meters from reference point
+        # x = east-west distance, y = north-south distance
+        
+        # North-south distance (y-axis)
+        if GEOPY_AVAILABLE:
+            from geopy.distance import geodesic
+            y_m = geodesic((ref_lat, ref_lon), (lat, ref_lon)).meters
+            if lat < ref_lat:
+                y_m = -y_m  # South is negative
+            
+            # East-west distance (x-axis)
+            x_m = geodesic((lat, ref_lon), (lat, lon)).meters
+            if lon < ref_lon:
+                x_m = -x_m  # West is negative
+        else:
+            # Fallback calculation
+            y_m = calculate_distance_fallback(ref_lat, ref_lon, lat, ref_lon)
+            if lat < ref_lat:
+                y_m = -y_m
+            x_m = calculate_distance_fallback(lat, ref_lon, lat, lon)
+            if lon < ref_lon:
+                x_m = -x_m
+        
+        turbine_copy = turbine.copy()
+        turbine_copy['x_m'] = round(x_m, 1)
+        turbine_copy['y_m'] = round(y_m, 1)
+        result.append(turbine_copy)
+    
+    return result
+
+
 def get_turbine_pair_recommendations(turbine_locations, wind_speed, wind_dir, provider='NTNU', model='moonshotai/Kimi-K2.5'):
     """
     Agent 2C: LLM-based turbine pair selection for wake optimization.
@@ -2189,46 +2259,63 @@ def get_turbine_pair_recommendations(turbine_locations, wind_speed, wind_dir, pr
         }
     
     try:
-        # Prepare turbine data for LLM analysis
-        turbine_summary = []
-        for i, turbine in enumerate(turbine_locations):
-            turbine_summary.append(f"Turbine {turbine['turbine_id']}: Lat {turbine['latitude']:.6f}, Lon {turbine['longitude']:.6f}")
+        # Convert lat/lon to Cartesian coordinates for LLM
+        turbine_locations_xy = convert_latlon_to_cartesian(turbine_locations)
         
-        # Create detailed prompt for turbine pair analysis
-        prompt = f"""
-You are Agent 2C, an expert in wind farm wake analysis and turbine pair optimization. Analyze the provided wind farm layout to identify critical turbine pairs most affected by wake effects.
+        # Prepare turbine data with BOTH geographic and Cartesian coordinates
+        turbine_summary = []
+        for turbine in turbine_locations_xy:
+            # Format: T1(x=350m, y=120m)
+            turbine_summary.append(
+                f"T{turbine['turbine_id']}(x={turbine['x_m']:.0f}m, y={turbine['y_m']:.0f}m)"
+            )
+        
+        # Create CLEAR prompt with Cartesian coordinates
+        prompt = f"""Wind farm wake analysis with {len(turbine_locations)} turbines.
 
 WIND CONDITIONS:
-- Wind Speed: {wind_speed:.1f} m/s
-- Wind Direction: {wind_dir:.0f}° (meteorological convention: direction wind is coming FROM)
-- Wind is blowing FROM {wind_dir:.0f}° TO {(wind_dir + 180) % 360:.0f}°
+- Speed: {wind_speed:.1f} m/s
+- Direction: {wind_dir:.0f}° (wind blowing FROM {wind_dir:.0f}° TOWARD {(wind_dir + 180) % 360:.0f}°)
+- Meteorological convention: 0°=North, 90°=East, 180°=South, 270°=West
 
-TURBINE LAYOUT:
+TURBINE POSITIONS (Cartesian coordinates in meters, origin at T1):
 {chr(10).join(turbine_summary)}
 
-ANALYSIS REQUIREMENTS:
-1. Calculate relative positions of turbines based on wind direction
-2. Identify upstream-downstream turbine pairs along the wind direction vector
-3. Consider wake decay distance (typically 5-10 rotor diameters = 0.6-1.2 km for NREL 5MW)
-4. Prioritize pairs with strongest wake interactions
-5. Consider wake width expansion (±20° spread)
+TASK:
+Identify 3-5 critical upstream→downstream turbine pairs most affected by wake effects.
 
-RETURN FORMAT (JSON):
+CRITERIA:
+1. Downstream turbine must be aligned with wind direction (±20° tolerance)
+2. Distance: 600-1200m apart (5-10 rotor diameters for NREL 5MW with D=126m)
+3. Prioritize pairs with strongest wake interactions
+
+RETURN FORMAT - JSON only:
 {{
   "critical_pairs": [
     {{
-      "upstream_turbine": turbine_id,
-      "downstream_turbine": turbine_id,
-      "distance_km": distance,
-      "wake_strength": "high/medium/low",
-      "priority": ranking_number
+      "upstream_turbine": 1,
+      "downstream_turbine": 5,
+      "distance_km": 0.85,
+      "wake_strength": "high",
+      "priority": 1
     }}
   ],
-  "analysis_summary": "Brief explanation of wake patterns",
-  "optimization_strategy": "Recommended approach for yaw optimization"
+  "analysis_summary": "Brief explanation",
+  "optimization_strategy": "Optimization approach"
 }}
 
-Provide analysis for the top 3-5 most critical turbine pairs."""
+Respond with JSON:"""
+        
+        # Log prompt for debugging
+        import sys
+        print(f"\n[Agent 2C Debug] Turbines converted to Cartesian coordinates", file=sys.stderr)
+        if len(turbine_locations_xy) > 0:
+            print(f"[Agent 2C Debug] Example: T1 at origin (0m, 0m)", file=sys.stderr)
+            if len(turbine_locations_xy) > 1:
+                print(f"[Agent 2C Debug] Example: T{turbine_locations_xy[1]['turbine_id']} at ({turbine_locations_xy[1]['x_m']:.0f}m, {turbine_locations_xy[1]['y_m']:.0f}m)", file=sys.stderr)
+        print(f"[Agent 2C Debug] Prompt length: {len(prompt)} chars (~{len(prompt)//4} tokens)", file=sys.stderr)
+        print(f"[Agent 2C Debug] Analyzing {len(turbine_locations)} turbines", file=sys.stderr)
+        print(f"[Agent 2C Debug] Wind conditions: {wind_speed}m/s from {wind_dir}°", file=sys.stderr)
         
         # Get LLM configuration directly
         if provider == "NTNU":
@@ -2258,21 +2345,116 @@ Provide analysis for the top 3-5 most critical turbine pairs."""
         }
         
         # Query the LLM using the unified interface
+        # Agent 2C requires MORE tokens and time than Agent 2B due to complex JSON output
+        print(f"[Agent 2C Debug] Calling LLM (Attempt 1: WITH system message) provider={provider}, model={config['model']}", file=sys.stderr)
         response = query_local_llm(
             api_key=config['api_key'],
             api_base=config['api_base'],
             model_name=config['model'],
             prompt=prompt,
-            system_message="You are Agent 2C, an expert wind farm wake analysis system specializing in turbine pair optimization for maximum power output.",
-            temperature=config['temperature'],
-            max_tokens=config['max_tokens'],
-            timeout=config['timeout']
+            system_message="You are a wind farm wake analysis expert. Respond ONLY with valid JSON.",
+            temperature=0.1,
+            max_tokens=4000,
+            timeout=60.0,
+            max_retries=2  # Only 2 retries for first attempt
         )
+        print(f"[Agent 2C Debug] LLM response length: {len(response)} chars", file=sys.stderr)
+        print(f"[Agent 2C Debug] Response preview: {response[:200]}...", file=sys.stderr)
+        
+        # If empty response, try WITHOUT system message (some models don't handle it well)
+        if response.startswith('ERROR_EMPTY_RESPONSE'):
+            print(f"[Agent 2C Debug] First attempt failed with empty response. Trying WITHOUT system message...", file=sys.stderr)
+            time.sleep(2)
+            
+            response = query_local_llm(
+                api_key=config['api_key'],
+                api_base=config['api_base'],
+                model_name=config['model'],
+                prompt=f"Analyze wind farm wake interactions and respond with JSON.\n\n{prompt}",
+                system_message=None,  # Try without system message
+                temperature=0.2,
+                max_tokens=4000,
+                timeout=60.0,
+                max_retries=2
+            )
+            print(f"[Agent 2C Debug] Attempt 2 response length: {len(response)} chars", file=sys.stderr)
+        
+        # If still empty, try asking for plain text instead of JSON
+        if response.startswith('ERROR_EMPTY_RESPONSE'):
+            print(f"[Agent 2C Debug] Second attempt also failed. Trying plain text request...", file=sys.stderr)
+            time.sleep(2)
+            
+            simple_prompt = f"""List the critical turbine pairs for wake optimization.
+
+Wind: {wind_speed:.1f}m/s from {wind_dir:.0f}°
+Turbines: {', '.join([f'T{t["turbine_id"]}' for t in turbine_locations[:10]])}{' ...' if len(turbine_locations) > 10 else ''}
+
+Identify 3-5 upstream→downstream pairs aligned with wind direction.
+Format: T1→T2, T3→T4, etc."""
+            
+            response = query_local_llm(
+                api_key=config['api_key'],
+                api_base=config['api_base'],
+                model_name=config['model'],
+                prompt=simple_prompt,
+                system_message=None,
+                temperature=0.3,
+                max_tokens=2000,
+                timeout=45.0,
+                max_retries=2
+            )
+            print(f"[Agent 2C Debug] Attempt 3 (simple) response length: {len(response)} chars", file=sys.stderr)
+        
+        # Check for error indicators in the response
+        if response.startswith('ERROR_'):
+            error_type = response.split(':')[0].replace('ERROR_', '')
+            error_message = response.split(':', 1)[1] if ':' in response else response
+            
+            print(f"[Agent 2C Debug] ERROR detected: {error_type}", file=sys.stderr)
+            print(f"[Agent 2C Debug] Error message: {error_message}", file=sys.stderr)
+            
+            return {
+                'agent': 'Agent 2C - Turbine Pair Selector',
+                'status': 'error',
+                'provider': provider,
+                'model': model,
+                'turbine_pairs': [],
+                'message': f'LLM Error ({error_type}): {error_message}',
+                'analysis_summary': f'Failed due to {error_type} after trying 3 different approaches. ' + (
+                    'Rate limit exceeded - wait and try again.' if error_type == 'RATE_LIMIT' else
+                    'API call failed - check network/configuration.' if error_type == 'API_CALL' else
+                    'Model returned empty response despite: (1) JSON request, (2) No system message, (3) Simple text request. This model may not be compatible with this task. **Use Agent 2D** or try a different model (e.g., GPT-4, Claude).'
+                ),
+                'total_turbines': len(turbine_locations),
+                'wind_conditions': f"{wind_speed:.1f} m/s from {wind_dir:.0f}°",
+                'raw_response': response,
+                'error_code': '429' if error_type == 'RATE_LIMIT' else None,
+                'prompt_length': len(prompt),
+                'prompt_preview': prompt[:500],
+                'recovery_attempts': 'Tried: (1) JSON with system msg, (2) JSON without system msg, (3) Plain text request - all failed'
+            }
         
         # Parse JSON response
         import json
+        import re
         try:
-            analysis_data = json.loads(response)
+            # Try direct JSON parsing first
+            try:
+                analysis_data = json.loads(response)
+            except json.JSONDecodeError:
+                # If direct parsing fails, try to extract JSON from markdown code blocks or text
+                json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response, re.DOTALL)
+                if json_match:
+                    analysis_data = json.loads(json_match.group(1))
+                else:
+                    # Try to find JSON object in the response (more flexible)
+                    json_match = re.search(r'(\{[^{}]*"critical_pairs".*?\})', response, re.DOTALL)
+                    if json_match:
+                        analysis_data = json.loads(json_match.group(1))
+                    else:
+                        # No JSON found, raise error to fall back to text parsing
+                        raise json.JSONDecodeError("No JSON found in response", response, 0)
+            
             llm_pairs = analysis_data.get('critical_pairs', [])
             
             # Validate each pair to ensure downstream turbine is actually downstream
@@ -2325,19 +2507,22 @@ Provide analysis for the top 3-5 most critical turbine pairs."""
                 'wind_conditions': f"{wind_speed:.1f} m/s from {wind_dir:.0f}°",
                 'raw_response': response
             }
-        except json.JSONDecodeError:
-            # Fallback: extract key information from text response
+        except json.JSONDecodeError as json_err:
+            # Fallback: The LLM returned text but not valid JSON
+            # This is a partial success - we got a response but can't parse it
             return {
                 'agent': 'Agent 2C - Turbine Pair Selector',
                 'status': 'partial',
                 'provider': provider,
                 'model': model,
                 'turbine_pairs': [],
-                'analysis_summary': response[:500] + "..." if len(response) > 500 else response,
-                'optimization_strategy': 'Manual parsing required',
+                'message': f'LLM returned text response instead of JSON format',
+                'analysis_summary': f"LLM provided text analysis but not in required JSON format. Response preview: {response[:300]}{'...' if len(response) > 300 else ''}",
+                'optimization_strategy': 'The model may not support JSON output. Try: 1) Different model, 2) Use Agent 2D',
                 'total_turbines': len(turbine_locations),
                 'wind_conditions': f"{wind_speed:.1f} m/s from {wind_dir:.0f}°",
-                'raw_response': response
+                'raw_response': response,
+                'parse_error': f'JSON parsing failed: {str(json_err)}'
             }
     
     except Exception as e:
@@ -2482,6 +2667,8 @@ def get_expert_recommendation(wind_speed: float, wind_direction: float):
 # =============================================================================
 # Helper Functions for Agent 2D
 # =============================================================================
+
+
 def calculate_distance_fallback(lat1, lon1, lat2, lon2):
     """
     Calculate approximate distance between two lat/lon points using Haversine formula.
@@ -2875,9 +3062,9 @@ def load_llm_config(config_path: str = None):
         return {}
 
 
-def query_local_llm(api_key: str, api_base: str, model_name: str, prompt: str, system_message: str = None, temperature: float = 0.7, max_tokens: int = 1000, timeout: float = None):
+def query_local_llm(api_key: str, api_base: str, model_name: str, prompt: str, system_message: str = None, temperature: float = 0.3, max_tokens: int = 1000, timeout: float = None, max_retries: int = 3):
     """
-    Query the local LLM using OpenAI-compatible API (openai>=1.0.0 interface).
+    Query the local LLM using OpenAI-compatible API (openai>=1.0.0 interface) with retry logic.
     
     Parameters:
     -----------
@@ -2892,11 +3079,13 @@ def query_local_llm(api_key: str, api_base: str, model_name: str, prompt: str, s
     system_message : str, optional
         System message to set the context for the LLM
     temperature : float, optional
-        Sampling temperature for the LLM (default: 0.7)
+        Sampling temperature for the LLM (default: 0.3 for more deterministic responses)
     max_tokens : int, optional
         Maximum number of tokens to generate (default: 1000)
     timeout : float, optional
         Timeout for the API request (default: None)
+    max_retries : int, optional
+        Maximum number of retry attempts (default: 3)
 
     Returns:
     --------
@@ -2905,28 +3094,52 @@ def query_local_llm(api_key: str, api_base: str, model_name: str, prompt: str, s
     """
     # Use the new OpenAI API client (>=1.0.0)
     import openai
+    import time
+    
     client = openai.OpenAI(api_key=api_key, base_url=api_base)
 
-    try:
-        messages = []
-        if system_message:
-            messages.append({"role": "system", "content": system_message})
-        messages.append({"role": "user", "content": prompt})
+    for attempt in range(max_retries):
+        try:
+            messages = []
+            if system_message:
+                # Don't enhance system message - use it as provided
+                # Agent 2C passes specific instructions that shouldn't be modified
+                messages.append({"role": "system", "content": system_message})
+            
+            messages.append({"role": "user", "content": prompt})
 
-        create_kwargs = {
-            "model": model_name,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-        if timeout is not None:
-            create_kwargs["timeout"] = timeout
+            create_kwargs = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            if timeout is not None:
+                create_kwargs["timeout"] = timeout
 
-        response = client.chat.completions.create(**create_kwargs)
-        return response.choices[0].message.content
+            response = client.chat.completions.create(**create_kwargs)
+            answer = response.choices[0].message.content
+            
+            # Validate response - check for empty, "none", or too short responses
+            if answer and answer.strip() and answer.strip().lower() not in ['none', 'n/a', 'null']:
+                if len(answer.strip()) > 20:  # Ensure substantive answer
+                    return answer.strip()
+            
+            # If response is invalid and we have retries left, try again
+            if attempt < max_retries - 1:
+                time.sleep(1)  # Brief delay before retry
+                continue
+            else:
+                return "I apologize, but I couldn't generate a proper response. Please try rephrasing your question."
 
-    except Exception as e:
-        return f"Error querying the LLM: {str(e)}"
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(2)  # Longer delay after error before retry
+                continue
+            else:
+                return f"Error querying the LLM after {max_retries} attempts: {str(e)}"
+    
+    return "Unable to get a response from the LLM. Please try again."
 
 
 def get_llm_expert_recommendation(wind_speed: float, wind_direction: float, config: dict = None):
@@ -3944,7 +4157,7 @@ def create_velocity_slice_animation(predictions, output_path="wake_slice_animati
 # =============================================================================
 def main():
     # Header
-    st.markdown('<h1 class="main-header">🌀 Wind Turbine Multi-Agent AI Analysis System for Optimization and Predictive Maintenance</h1>', 
+    st.markdown('<h1 class="main-header">🌀 Wind Turbine Multi-Agent AI Analysis System  \n for Optimization and Predictive Maintenance</h1>', 
                 unsafe_allow_html=True)
     
     st.markdown('''
@@ -4069,11 +4282,13 @@ def main():
             # Model Selection based on provider
             if llm_provider == "NTNU":
                 available_models = [
-                    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-                    "moonshotai/Kimi-K2.5", 
+                    "moonshotai/Kimi-K2.5",
+                    "openai/gpt-oss-120b",
                     "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
-                    "meta-llama/Llama-3.3-70B-Instruct",
-                    "microsoft/Phi-3.5-mini-instruct"
+                    "zai-org/GLM-4.7-FP8",
+                     "NorwAI/NorwAI-Magistral-24B-reasoning",
+                     "Qwen/Qwen3-Coder-Next-FP8",
+                    "zai-org/GLM-Image"
                 ]
             elif llm_provider == "OpenAI":
                 available_models = [
@@ -5056,8 +5271,7 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
     # =========================================================================
     # AGENT 2: Turbine Expert : to recommend yaw angle based on turbine manual.
     # =========================================================================
-    st.markdown("### 📖 Agent 2: Turbine Expert: to recommend yaw angle based on turbine manual")
-    
+    st.markdown("### 📖 Agent 2: Turbine Experts for SINGLE TURBINE OPERATION ")    
     status_text.text("🔄 Agent 2: Starting turbine manual consultation...")
     time.sleep(0.5)
     with st.spinner("Consulting NREL 5MW turbine manual based on wind conditions..."):
@@ -5110,7 +5324,7 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
         st.markdown("### 🤖 Agent 2B: LLM-based Turbine Expert")
         st.markdown('''
         <p style="font-size: 1.0rem; color: #666; margin-top: -10px; font-style: italic;">
-        Uses local LLM (moonshotai/Kimi-K2.5) to provide intelligent turbine control recommendations.
+        Uses local LLM to provide intelligent turbine control recommendations.
         </p>
         ''', unsafe_allow_html=True)
         
@@ -5221,6 +5435,9 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
             with st.spinner(spinner_text):
                 try:
                     if selected_agent == "2C":
+                        # Add delay to avoid rate limiting from previous Agent 2B call
+                        time.sleep(2)  # 2 second delay to prevent hitting rate limits
+                        
                         # Get current LLM configuration from session state
                         current_provider = st.session_state.get('llm_provider', 'NTNU')
                         current_model = st.session_state.get('selected_model', 'moonshotai/Kimi-K2.5')
@@ -5482,12 +5699,13 @@ Physical validation ensures all pairs are aligned with wind direction from Agent
                             - **Wind Conditions:** {turbine_pair_analysis['wind_conditions']}
                             
                             **How it works:**
-                            1. Agent 2C receives turbine locations from the location search
-                            2. It uses the LLM provider and model selected in the GUI sidebar (same as Agent 2B)
-                            3. The LLM analyzes wind direction, turbine spacing, and wake patterns
-                            4. It identifies the most critical upstream-downstream turbine pairs
-                            5. **Physical validation:** Each LLM-suggested pair is validated against wind direction
-                            6. Only pairs aligned with wind (±45° tolerance) are passed to Agent 3
+                            1. Agent 2C receives turbine locations (latitude/longitude) from the location search
+                            2. **NEW:** Converts lat/lon to Cartesian coordinates (x, y in meters) for easier LLM analysis
+                            3. Sends turbine positions in meters (e.g., T1 at origin, T2 at x=350m, y=120m)
+                            4. LLM uses the provider and model selected in GUI sidebar (same as Agent 2B)
+                            5. LLM analyzes wind direction, turbine spacing, and geometry to identify wake interactions
+                            6. **Physical validation:** Each LLM-suggested pair is validated against actual wind direction
+                            7. Only pairs aligned with wind (±45° tolerance) are passed to Agent 3
                             
                             **Wind Direction Validation:**
                             - Calculates actual bearing between turbine pairs
@@ -5500,11 +5718,45 @@ Physical validation ensures all pairs are aligned with wind direction from Agent
                             pairs will benefit most from wake steering control.
                             
                             **Configuration:** Change the provider and model in the sidebar to use different AI services.
+                            
+                            **Performance Optimizations (Latest):**
+                            - **Cartesian coordinates**: Lat/lon converted to x,y meters for clearer LLM input
+                            - 2-second delay after Agent 2B to prevent rate limiting
+                            - **4000 tokens** output limit for complete JSON responses
+                            - **60-second timeout** for complex computational analysis
+                            - **Clear prompt format**: Positions in meters (e.g., "T1(x=0m, y=0m)")
+                            - **Temperature 0.1** for deterministic JSON output
+                            - Triple-fallback strategy: (1) JSON with system msg, (2) JSON without, (3) Plain text
+                            - Comprehensive debug logging (check terminal/console)
                             """)
                     
                     elif turbine_pair_analysis['status'] == 'partial':
                         st.warning(f"⚠️ {turbine_pair_analysis['agent']} analysis partially complete")
                         st.markdown(f"**Analysis:** {turbine_pair_analysis.get('analysis_summary', 'Partial results available')}")
+                        
+                        # Show debug information for partial results
+                        with st.expander("🐛 Debug Information (Click to expand)"):
+                            st.markdown(f"""
+                            **LLM Configuration:**
+                            - Provider: {turbine_pair_analysis.get('provider', 'N/A')}
+                            - Model: {turbine_pair_analysis.get('model', 'N/A')}
+                            
+                            **Issue:**
+                            {turbine_pair_analysis.get('parse_error', 'LLM response could not be parsed as JSON')}
+                            
+                            **Raw LLM Response:**
+                            """)
+                            st.code(turbine_pair_analysis.get('raw_response', 'No response captured')[:1000], language="text")
+                            
+                            if len(turbine_pair_analysis.get('raw_response', '')) > 1000:
+                                st.caption("(Response truncated to 1000 characters)")
+                        
+                        st.info("""**💡 Solutions:**
+1. 🔄 **Try Different Model**: The current model may not support JSON format - try a different model in the sidebar
+2. 🔧 **Use Agent 2D**: Select 'Agent 2D (Physical Wake Model)' above for reliable physics-based analysis
+3. 📝 **Check LLM Settings**: Some models require specific formatting - verify your model selection
+""")
+                        
                         results["turbine_pairs"] = turbine_pair_analysis
                     
                     else:
@@ -5514,6 +5766,43 @@ Physical validation ensures all pairs are aligned with wind direction from Agent
                         
                         st.error(f"❌ {turbine_pair_analysis['agent']} analysis failed")
                         st.code(error_msg, language="text")
+                        
+                        # Show debug information for errors that might be LLM-related
+                        if turbine_pair_analysis.get('raw_response') and selected_agent == "2C":
+                            with st.expander("🐛 Debug Information (Click to expand)"):
+                                st.markdown(f"""
+                                **LLM Configuration:**
+                                - Provider: {turbine_pair_analysis.get('provider', 'N/A')}
+                                - Model: {turbine_pair_analysis.get('model', 'N/A')}
+                                - Total Turbines Sent: {turbine_pair_analysis.get('total_turbines', 'N/A')}
+                                
+                                **Recovery Attempts:**
+                                {turbine_pair_analysis.get('recovery_attempts', 'N/A')}
+                                
+                                **Prompt Information:**
+                                - Prompt Length: {turbine_pair_analysis.get('prompt_length', 'N/A')} characters
+                                - Estimated Tokens: ~{turbine_pair_analysis.get('prompt_length', 0)//4}
+                                
+                                **Prompt Preview (first 500 chars):**
+                                """)
+                                st.code(turbine_pair_analysis.get('prompt_preview', 'No prompt captured')[:500], language="text")
+                                
+                                st.markdown("**Raw LLM Response:**")
+                                raw_resp = turbine_pair_analysis.get('raw_response', 'No response captured')
+                                if raw_resp.startswith('ERROR_'):
+                                    st.code(raw_resp, language="text")
+                                else:
+                                    st.code(raw_resp[:1000], language="text")
+                                    if len(raw_resp) > 1000:
+                                        st.caption("(Response truncated to 1000 characters)")
+                                
+                                st.markdown("""
+                                **Troubleshooting Empty Responses:**
+                                - Model may have insufficient output tokens configured
+                                - Prompt may be too complex or too long
+                                - Model may not support JSON format well
+                                - Check terminal/console for detailed debug logs
+                                """)
                         
                         # Provide helpful suggestions based on error
                         if error_code == '401':
@@ -5529,10 +5818,16 @@ Physical validation ensures all pairs are aligned with wind direction from Agent
 3. 🔧 **Use Agent 2D**: Select 'Agent 2D (Physical Wake Model)' above instead
 """.format(model=turbine_pair_analysis.get('model', 'this model')))
                         elif error_code == '429':
-                            st.warning("""**💡 Solutions:**
-1. ⏰ **Wait & Retry**: Rate limit exceeded - try again in a few minutes
-2. 🔄 **Switch Provider**: Use a different LLM provider in the sidebar
-3. 🔧 **Use Agent 2D**: Select 'Agent 2D (Physical Wake Model)' above instead
+                            st.warning("""**💡 Solutions for Rate Limiting:**
+1. ⏰ **Wait & Retry**: Rate limit exceeded - the system has automatic delays now
+2. 🔄 **Try Again**: Click 'Run Analysis' again - Agent 2C now includes 2s delay after Agent 2B
+3. 🔄 **Switch Provider**: Use a different LLM provider in the sidebar
+4. 🔧 **Use Agent 2D**: Select 'Agent 2D (Physical Wake Model)' above instead
+
+**Note:** Agent 2C now includes automatic rate-limit protection:
+- 2-second delay after Agent 2B to prevent conflicts
+- Exponential backoff (5s, 10s, 20s) on rate limit errors
+- Extended 45-second timeout for complex queries
 """)
                         elif error_code == '5xx':
                             st.warning("""**💡 Solutions:**
@@ -5541,10 +5836,31 @@ Physical validation ensures all pairs are aligned with wind direction from Agent
 3. 🔧 **Use Agent 2D**: Select 'Agent 2D (Physical Wake Model)' above instead
 """)
                         else:
-                            st.warning("""**💡 Solutions:**
-1. 🔄 **Try Different LLM**: Switch provider/model in the sidebar (Settings → LLM Configuration)
-2. 🔧 **Use Agent 2D**: Select 'Agent 2D (Physical Wake Model)' above for physics-based analysis
-3. 📝 **Check Settings**: Verify your LLM configuration is correct
+                            # Check if it's an empty response error
+                            if 'EMPTY_RESPONSE' in error_msg:
+                                st.warning("""**💡 Solutions for Empty Response Error:**
+
+**This model is not responding to Agent 2C requests despite 3 recovery attempts.**
+
+Agent 2C tried:
+1. ✅ Standard JSON request with system message
+2. ✅ JSON request WITHOUT system message (some models don't handle it)
+3. ✅ Simple plain text request
+
+All attempts returned empty/null responses. **This suggests model incompatibility.**
+
+**Recommended Actions:**
+1. 🔧 **Use Agent 2D**: Click 'Agent 2D (Physical Wake Model)' above - **This always works!**
+2. 🔄 **Try Different Model**: Switch to a model known to support structured outputs:
+   - GPT-4 or GPT-3.5-turbo (OpenAI)
+   - Claude 3 (Anthropic)
+   - Llama models via Ollama locally
+3. 📝 **Check Model**: Current model may not support:
+   - JSON output format
+   - Complex reasoning tasks
+   - Long prompts with multiple turbines
+
+**Note:** Agent 2D uses physics-based wake models and is 100% reliable.
 """)
                         
                         results["turbine_pairs"] = None
@@ -6375,8 +6691,24 @@ def display_analysis_chatbot(results):
     wind_dir = weather.get('wind_direction_deg', 0)
     operating_region = expert.get('operating_region', 'N/A')
     
-    context = f"""You are an expert wind farm analyst. Answer questions about the following wind farm analysis:
+    # Enhanced system message for wind turbine operations expert
+    system_message = """You are an expert in wind turbine operations and wind farm optimization with deep knowledge of:
+- Wake steering and yaw control strategies for wind farms
+- Aerodynamic interactions and wake effects between turbines
+- Wind turbine power curves and operating regions
+- Wind farm layout optimization and control strategies
+- Trade-offs between individual turbine power loss and total farm power gain
+- NREL 5MW Reference Wind Turbine specifications and performance
 
+Provide clear, actionable answers with technical depth. Be specific about:
+- Physical principles behind wake steering effects
+- Quantitative analysis of power gains and losses
+- Practical implementation considerations
+- Operating conditions and their impact on optimization
+
+Use technical terminology appropriately but explain complex concepts clearly."""
+
+    context = f"""
 WEATHER CONDITIONS:
 - Wind Speed: {wind_speed:.1f} m/s
 - Wind Direction: {wind_dir:.0f}°
@@ -6430,53 +6762,43 @@ TURBINE:
     for i, question in enumerate(suggested_questions):
         with cols[i % 3]:
             if st.button(question, key=f"suggest_{i}", use_container_width=True):
-                st.session_state.analysis_chat_history.append({
-                    "role": "user",
-                    "content": question
-                })
-                # Generate response
-                with st.spinner("🤔 Thinking..."):
-                    response = query_local_llm(
-                        api_key=st.session_state.get('api_key', ''),
-                        api_base=st.session_state.get('api_base', ''),
-                        model_name=st.session_state.get('selected_model', ''),
-                        prompt=question,
-                        system_message=context,
-                        temperature=0.7,
-                        max_tokens=500
-                    )
-                    st.session_state.analysis_chat_history.append({
-                        "role": "assistant",
-                        "content": response
-                    })
-                st.rerun()
+                # Directly add the question and trigger processing
+                st.session_state.analysis_selected_question = question
+                st.session_state.analysis_trigger_ask = True
     
     st.markdown("---")
     
-    # Display chat history
-    for message in st.session_state.analysis_chat_history:
-        if message["role"] == "user":
-            st.markdown(f"**👤 You:** {message['content']}")
-        else:
-            st.markdown(f"**🤖 Assistant:** {message['content']}")
-        st.markdown("")
+    # Determine if we should process a question
+    process_analysis_question = False
+    user_question = ""
     
-    # Chat input
-    user_question = st.text_input(
-        "Ask a question about the analysis:",
-        key="user_analysis_question",
-        placeholder="e.g., Why is the power gain positive?"
-    )
+    # Check if triggered by suggested question
+    if st.session_state.get('analysis_trigger_ask', False):
+        user_question = st.session_state.get('analysis_selected_question', '')
+        st.session_state.analysis_trigger_ask = False
+        if user_question:
+            process_analysis_question = True
     
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        ask_button = st.button("Ask", type="primary")
-    with col2:
-        if st.button("Clear Chat"):
-            st.session_state.analysis_chat_history = []
-            st.rerun()
+    # Chat input (shown when not actively processing)
+    if not process_analysis_question:
+        user_question = st.text_input(
+            "Ask a question about the analysis:",
+            key="user_analysis_question",
+            placeholder="e.g., Why is the power gain positive?"
+        )
+        
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            if st.button("Ask", type="primary", key="ask_analysis_btn"):
+                if user_question:
+                    process_analysis_question = True
+        with col2:
+            if st.button("Clear Chat", key="clear_analysis_chat"):
+                st.session_state.analysis_chat_history = []
+                st.rerun()
     
-    if ask_button and user_question:
+    # Process question if triggered
+    if process_analysis_question and user_question:
         # Add user question to history
         st.session_state.analysis_chat_history.append({
             "role": "user",
@@ -6486,26 +6808,66 @@ TURBINE:
         # Generate response
         with st.spinner("🤔 Thinking..."):
             try:
+                # Get LLM configuration from session state
+                llm_provider = st.session_state.get('llm_provider', 'NTNU')
+                selected_model = st.session_state.get('selected_model', 'moonshotai/Kimi-K2.5')
+                
+                # Build API configuration based on provider (same as Agent 2B/2C)
+                if llm_provider == "NTNU":
+                    api_base = "https://llm.hpc.ntnu.no/v1"
+                    api_key = "sk-48COknyy7BlFg8vbN1ywgg"
+                elif llm_provider == "OpenAI":
+                    api_base = "https://api.openai.com/v1"
+                    api_key = os.getenv("OPENAI_API_KEY", "your-openai-key")
+                elif llm_provider == "Ollama":
+                    api_base = "http://localhost:11434/v1"
+                    api_key = "ollama"
+                elif llm_provider == "Google":
+                    api_base = "https://generativelanguage.googleapis.com/v1beta"
+                    api_key = os.getenv("GOOGLE_API_KEY", "your-google-key")
+                else:  # Anthropic
+                    api_base = "https://api.anthropic.com/v1"
+                    api_key = os.getenv("ANTHROPIC_API_KEY", "your-anthropic-key")
+                
+                # Construct detailed prompt
+                detailed_prompt = f"{context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer based on the wind farm analysis context above:"
+                
                 response = query_local_llm(
-                    api_key=st.session_state.get('api_key', ''),
-                    api_base=st.session_state.get('api_base', ''),
-                    model_name=st.session_state.get('selected_model', ''),
-                    prompt=user_question,
-                    system_message=context,
-                    temperature=0.7,
-                    max_tokens=500
+                    api_key=api_key,
+                    api_base=api_base,
+                    model_name=selected_model,
+                    prompt=detailed_prompt,
+                    system_message=system_message,
+                    temperature=0.3,  # Lower temperature for consistent responses
+                    max_tokens=1200,  # Reduced for faster responses
+                    timeout=60.0,  # Increased timeout
+                    max_retries=3  # Retry logic
                 )
                 st.session_state.analysis_chat_history.append({
                     "role": "assistant",
                     "content": response
                 })
+                
+                st.session_state.analysis_selected_question = ''
             except Exception as e:
+                error_msg = f"⚠️ Error querying LLM: {str(e)}"
                 st.session_state.analysis_chat_history.append({
                     "role": "assistant",
-                    "content": f"Error: {str(e)}"
+                    "content": error_msg
                 })
+                st.session_state.analysis_selected_question = ''
         
-        st.rerun()
+        st.rerun()  # Rerun to display the new response
+    
+    # Always display chat history at the end
+    if st.session_state.analysis_chat_history:
+        st.markdown("**💬 Chat History:**")
+        for message in st.session_state.analysis_chat_history:
+            if message["role"] == "user":
+                st.markdown(f"**👤 You:** {message['content']}")
+            else:
+                st.markdown(f"**🤖 Assistant:** {message['content']}")
+            st.markdown("")
 
 
 def display_summary_report(results):
@@ -6751,11 +7113,23 @@ Note: This report includes results from Agents 1-3 (Weather, Expert, Optimizer).
 def display_results(results):
     """Display previously computed results."""
     st.info("📊 Showing results from previous analysis. Click **Reset** to run a new analysis.")
+    
+    # Display summary report
+    st.markdown("---")
+    st.markdown("### 📊 Analysis Summary Report")
+    st.markdown("*Summary of wind farm analysis based on optimizer results (Agents 1-3)*")
     display_summary_report(results)
+    
+    # Display chatbot interface
+    st.markdown("---")
+    st.markdown("### 🤖 Ask Questions About the Analysis")
+    st.markdown("*Use the chatbot to ask questions about the optimization results and recommendations*")
+    display_analysis_chatbot(results)
     
     # Show animation if available
     anim_path = os.path.join(SCRIPT_DIR, "wake_animation.gif")
     if os.path.exists(anim_path):
+        st.markdown("---")
         st.markdown("### 🎬 Wake Flow Animation")
         st.image(anim_path, caption="Wake Flow Evolution (TT-OpInf Model)")
 

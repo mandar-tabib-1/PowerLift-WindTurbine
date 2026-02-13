@@ -57,54 +57,53 @@ class NTNULLM(BaseLLM):
         prompt: str, 
         system: Optional[str] = None,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        retries: int = 3
     ) -> str:
-        """Generate completion using NTNU models."""
+        """Generate completion using NTNU models with retry logic."""
         
         # Use config defaults if not provided
         temperature = temperature if temperature is not None else self.default_temperature
         max_tokens = max_tokens if max_tokens is not None else self.default_max_tokens
         
+        # Enhanced system message for predictive maintenance
         messages = []
         if system:
-            messages.append({"role": "system", "content": system})
+            enhanced_system = "You are an expert in predictive maintenance. Answer the following question in detail. " + system
+            messages.append({"role": "system", "content": enhanced_system})
+        else:
+            messages.append({"role": "system", "content": "You are an expert in predictive maintenance and wind turbine analysis. Provide detailed, technical answers."})
+        
         messages.append({"role": "user", "content": prompt})
         
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-            
-            return response.choices[0].message.content
-            
-        except openai.APITimeoutError as e:
-            raise RuntimeError(
-                f"NTNU API timeout after {self.timeout}s. This could be due to:\n"
-                f"1. Network connectivity issues (Are you on NTNU network or VPN?)\n"
-                f"2. NTNU server being overloaded\n"
-                f"3. Large model '{self.model}' taking longer than expected\n"
-                f"Original error: {str(e)}"
-            )
-        except openai.APIConnectionError as e:
-            raise RuntimeError(
-                f"NTNU API connection error. Please check:\n"
-                f"1. You are connected to NTNU network or VPN\n"
-                f"2. The base URL '{self.base_url}' is accessible\n"
-                f"3. Your API key is correct\n"
-                f"Original error: {str(e)}"
-            )
-        except openai.AuthenticationError as e:
-            raise RuntimeError(
-                f"NTNU API authentication error. Please check:\n"
-                f"1. Your API key format - NTNU expects keys starting with 'sk-'\n"
-                f"2. For personal API: Contact help@hpc.ntnu.no to get an API key starting with 'sk-'\n"
-                f"3. For shared access: Use 'sk-IDUN-NTNU-LLM-API-KEY' (if available)\n"
-                f"4. Ensure you have access to the NTNU LLM service\n"
-                f"Current API key: {self.api_key[:10]}... (first 10 chars)\n"
-                f"Original error: {str(e)}"
-            )
-        except Exception as e:
-            raise RuntimeError(f"NTNU API error: {str(e)}")
+        import time
+        for attempt in range(retries):
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                answer = response.choices[0].message.content
+                
+                # Validate response - check for empty, "none", or too short responses
+                if answer and answer.strip() and answer.strip().lower() not in ['none', 'n/a', 'null']:
+                    if len(answer.strip()) > 20:  # Ensure substantive answer
+                        return answer
+                
+                # If response is invalid and we have retries left, try again
+                if attempt < retries - 1:
+                    time.sleep(1)  # Brief delay before retry
+                    continue
+                else:
+                    return "I apologize, but I couldn't generate a proper response. Please try rephrasing your question."
+                    
+            except Exception as e:
+                if attempt < retries - 1:
+                    time.sleep(2)  # Longer delay after error before retry
+                    continue
+                else:
+                    raise e
+        
+        return "Unable to get a response from the LLM. Please try again."

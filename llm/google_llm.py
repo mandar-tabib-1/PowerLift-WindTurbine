@@ -52,29 +52,31 @@ class GoogleLLM(BaseLLM):
         prompt: str, 
         system: Optional[str] = None,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        retries: int = 3
     ) -> str:
-        """Generate completion using Gemini."""
+        """Generate completion using Gemini with retry logic."""
         
         # Use config defaults if not provided
         temperature = temperature if temperature is not None else self.default_temperature
         max_tokens = max_tokens if max_tokens is not None else self.default_max_tokens
         
-        # Build the generation config
         config = types.GenerateContentConfig(
             temperature=temperature,
             max_output_tokens=max_tokens,
         )
         
-        # Add system instruction if provided
         if system:
-            config.system_instruction = system
+            config.system_instruction = "You are an expert in predictive maintenance. Answer the following question in detail."
         
-        # Generate content using the new API
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=config,
-        )
-        
-        return response.text
+        for attempt in range(retries):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=config
+                )
+                return response["choices"][0]["message"]["content"]
+            except Exception as e:
+                if attempt == retries - 1:
+                    raise e
