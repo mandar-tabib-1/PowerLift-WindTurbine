@@ -3409,6 +3409,398 @@ class DifferentiableWakeSurrogate(torch.nn.Module):
         return torch.clamp(deficit, 0.0, 0.5)
 
 
+class BayesianTransferOptimizer:
+    """
+    Bayesian Optimization with Transfer Learning for yaw angle optimization.
+    
+    This optimizer treats the pre-trained GPR model's posterior mean as a base function,
+    then trains a residual GP to capture correction terms. This is a common approach
+    in transfer learning for surrogate modeling.
+    
+    Uses Expected Improvement (EI) acquisition function with:
+    - Matérn 5/2 kernel with ARD length-scales
+    - Multi-start L-BFGS-B to optimize EI
+    - Constraint: yaw angles between 0-15 degrees
+    """
+    
+    def __init__(self, base_gp_agent, wake_agent, turbine_spacing_D=7.0, 
+                 n_initial_samples=5, xi_lengthscale_range=(0.01, 0.05), 
+                 n_timesteps=50, freestream_velocity=8.5):
+        """
+        Initialize Bayesian Transfer Optimizer.
+        
+        Parameters:
+        -----------
+        base_gp_agent : RotorPowerAgent
+            Pre-trained GP model for power prediction
+        wake_agent : WakeFlowAgent
+            Wake flow prediction agent
+        turbine_spacing_D : float
+            Turbine spacing in rotor diameters
+        n_initial_samples : int
+            Number of initial random samples
+        xi_lengthscale_range : tuple
+            Range for ARD length-scale parameter (min, max)
+        n_timesteps : int
+            Number of timesteps for predictions
+        freestream_velocity : float
+            Freestream wind velocity (m/s)
+        """
+        from sklearn.gaussian_process import GaussianProcessRegressor
+        from sklearn.gaussian_process.kernels import Matern, ConstantKernel, RBF
+        
+        self.base_gp_agent = base_gp_agent
+        self.wake_agent = wake_agent
+        self.turbine_spacing_D = turbine_spacing_D
+        self.n_initial_samples = n_initial_samples
+        self.n_timesteps = n_timesteps
+        self.freestream_velocity = freestream_velocity
+        
+        # Initialize residual GP with Matérn 5/2 kernel (twice differentiable)
+        kernel = ConstantKernel(1.0, constant_value_bounds=(1e-3, 1e3)) * \
+                 Matern(length_scale=0.03, length_scale_bounds=xi_lengthscale_range, nu=2.5)
+        
+        self.residual_gp = GaussianProcessRegressor(
+            kernel=kernel,
+            n_restarts_optimizer=10,
+            alpha=1e-6,
+            normalize_y=True
+        )
+        
+        # Storage for observations
+        self.X_obs = []
+        self.y_obs = []
+        self.y_base_obs = []
+        
+    def _generate_initial_observations(self, yaw_range=(0, 15)):
+        """
+        Generate initial observations by sampling base GP with synthetic noise.
+        
+        This simulates actual observations and allows us to compute residuals.
+        """
+        np.random.seed(42)
+        
+        # Sample random yaw angles in the range
+        yaw_samples = np.random.uniform(yaw_range[0], yaw_range[1], self.n_initial_samples)
+        
+        X_init = []
+        y_init = []
+        y_base_init = []
+        
+        for yaw_misalign in yaw_samples:
+            # Get base GP prediction for farm power
+            farm_power_base = self._evaluate_farm_power_base(yaw_misalign)
+            
+            # Add synthetic Gaussian noise to simulate real observations
+            # Noise level: 0.05 MW standard deviation
+            farm_power_observed = farm_power_base + np.random.normal(0, 0.05)
+            
+            X_init.append([yaw_misalign])
+            y_init.append(farm_power_observed)
+            y_base_init.append(farm_power_base)
+        
+        self.X_obs = np.array(X_init)
+        self.y_obs = np.array(y_init)
+        self.y_base_obs = np.array(y_base_init)
+        
+        # Compute residuals
+        y_residuals = self.y_obs - self.y_base_obs
+        
+        return self.X_obs, y_residuals
+    
+    def _evaluate_farm_power_base(self, yaw_misalignment):
+        """
+        Evaluate total farm power using base GP model (no residual correction).
+        
+        Parameters:
+        -----------
+        yaw_misalignment : float
+            Upstream turbine yaw misalignment (degrees)
+        
+        Returns:
+        --------
+        float
+            Total farm power (MW)
+        """
+        # Calculate downstream yaw based on wake deflection physics
+        downstream_misalign = calculate_wake_deflected_downstream_yaw(
+            yaw_misalignment, self.turbine_spacing_D
+        )
+        
+        # Convert to nacelle directions
+        upstream_nacelle = 270.0 + yaw_misalignment
+        downstream_nacelle = 270.0 + downstream_misalign
+        
+        # Get upstream power from base GP
+        upstream_result = self.base_gp_agent.predict(
+            yaw_angle=upstream_nacelle, n_time_points=self.n_timesteps
+        )
+        upstream_power = np.mean(upstream_result['power_mean_MW'])
+        
+        # Get wake deficit
+        wake_pred, _ = self.wake_agent.predict(
+            yaw_angle=upstream_nacelle, n_timesteps=self.n_timesteps,
+            export_vtk=False, verbose=False
+        )
+        vel_mag = np.linalg.norm(wake_pred, axis=2)
+        base_deficit = 1.0 - (np.mean(vel_mag) / self.freestream_velocity)
+        base_deficit = np.clip(base_deficit, 0, 0.5)
+        
+        # Wake steering effect
+        k_steering = 0.6
+        upstream_rad = np.radians(yaw_misalignment)
+        steering_factor = k_steering * np.sin(upstream_rad) * np.cos(upstream_rad)**2
+        effective_deficit = base_deficit * (1.0 - steering_factor)
+        
+        # Get downstream power
+        downstream_result = self.base_gp_agent.predict(
+            yaw_angle=downstream_nacelle, n_time_points=self.n_timesteps
+        )
+        downstream_power_base = np.mean(downstream_result['power_mean_MW'])
+        downstream_power = downstream_power_base * (1 - effective_deficit)**3
+        
+        total_power = upstream_power + downstream_power
+        return total_power
+    
+    def fit_residual_gp(self, X, y_residuals):
+        """
+        Fit the residual GP on observed residuals.
+        
+        Parameters:
+        -----------
+        X : ndarray, shape (n_samples, 1)
+            Yaw misalignment angles
+        y_residuals : ndarray, shape (n_samples,)
+            Residuals (observed - base GP predictions)
+        """
+        self.residual_gp.fit(X, y_residuals)
+    
+    def predict_combined(self, yaw_angle):
+        """
+        Predict farm power using base GP + residual GP correction.
+        
+        Parameters:
+        -----------
+        yaw_angle : float or ndarray
+            Yaw misalignment angle(s)
+        
+        Returns:
+        --------
+        tuple
+            (mean_power, std_power) - Mean and standard deviation of predicted power
+        """
+        if np.isscalar(yaw_angle):
+            X_pred = np.array([[yaw_angle]])
+        else:
+            X_pred = np.array(yaw_angle).reshape(-1, 1)
+        
+        # Get base GP prediction
+        y_base = np.array([self._evaluate_farm_power_base(x[0]) for x in X_pred])
+        
+        # Get residual GP prediction
+        y_residual_mean, y_residual_std = self.residual_gp.predict(X_pred, return_std=True)
+        
+        # Combine: total = base + residual
+        y_total_mean = y_base + y_residual_mean
+        y_total_std = y_residual_std  # Uncertainty from residual GP
+        
+        if np.isscalar(yaw_angle):
+            return y_total_mean[0], y_total_std[0]
+        else:
+            return y_total_mean, y_total_std
+    
+    def expected_improvement(self, yaw_angle, f_best, xi=0.01):
+        """
+        Compute Expected Improvement acquisition function.
+        
+        Parameters:
+        -----------
+        yaw_angle : float or ndarray
+            Yaw misalignment angle(s)
+        f_best : float
+            Best observed function value so far
+        xi : float
+            Exploration-exploitation trade-off parameter
+        
+        Returns:
+        --------
+        float or ndarray
+            Expected Improvement value(s)
+        """
+        from scipy.stats import norm
+        
+        mu, sigma = self.predict_combined(yaw_angle)
+        
+        # Avoid division by zero
+        sigma = np.maximum(sigma, 1e-9)
+        
+        # Compute EI
+        Z = (mu - f_best - xi) / sigma
+        ei = (mu - f_best - xi) * norm.cdf(Z) + sigma * norm.pdf(Z)
+        
+        return ei
+    
+    def optimize_acquisition_multistart(self, f_best, n_starts=10, bounds=(0, 15), xi=0.01):
+        """
+        Optimize Expected Improvement using multi-start L-BFGS-B.
+        
+        Parameters:
+        -----------
+        f_best : float
+            Best observed function value
+        n_starts : int
+            Number of random restarts
+        bounds : tuple
+            (min, max) bounds for yaw angle
+        xi : float
+            EI exploration parameter
+        
+        Returns:
+        --------
+        float
+            Optimal yaw angle that maximizes EI
+        """
+        from scipy.optimize import minimize
+        
+        best_x = None
+        best_ei = -np.inf
+        
+        # Random starting points
+        np.random.seed(None)  # Use current time for randomness
+        x0_samples = np.random.uniform(bounds[0], bounds[1], n_starts)
+        
+        for x0 in x0_samples:
+            # Minimize negative EI (maximize EI)
+            result = minimize(
+                fun=lambda x: -self.expected_improvement(x, f_best, xi),
+                x0=[x0],
+                method='L-BFGS-B',
+                bounds=[bounds]
+            )
+            
+            if result.success:
+                ei_value = -result.fun
+                if ei_value > best_ei:
+                    best_ei = ei_value
+                    best_x = result.x[0]
+        
+        # Fallback if no optimization succeeded
+        if best_x is None:
+            best_x = x0_samples[0]
+        
+        return np.clip(best_x, bounds[0], bounds[1])
+    
+    def optimize(self, n_iterations=15, verbose=False, xi_range=(0.01, 0.05)):
+        """
+        Run Bayesian Optimization loop.
+        
+        Parameters:
+        -----------
+        n_iterations : int
+            Number of BO iterations
+        verbose : bool
+            Print progress
+        xi_range : tuple
+            Range for exploration parameter xi
+        
+        Returns:
+        --------
+        dict
+            Optimization results
+        """
+        # Generate initial observations
+        X_init, y_residuals = self._generate_initial_observations()
+        
+        # Fit residual GP on initial data
+        self.fit_residual_gp(X_init, y_residuals)
+        
+        # Track best result
+        best_power = np.max(self.y_obs)
+        best_idx = np.argmax(self.y_obs)
+        best_yaw = self.X_obs[best_idx, 0]
+        
+        if verbose:
+            print(f"  Initial best: yaw={best_yaw:.2f}°, power={best_power:.4f} MW")
+        
+        results_history = []
+        
+        # Bayesian Optimization loop
+        for iteration in range(n_iterations):
+            # Adaptive xi: higher exploration early, more exploitation later
+            xi = xi_range[0] + (xi_range[1] - xi_range[0]) * (1 - iteration / n_iterations)
+            
+            # Optimize acquisition function to find next point
+            next_yaw = self.optimize_acquisition_multistart(
+                f_best=best_power, n_starts=10, bounds=(0, 15), xi=xi
+            )
+            
+            # Evaluate farm power at next point
+            farm_power_base = self._evaluate_farm_power_base(next_yaw)
+            farm_power_observed = farm_power_base + np.random.normal(0, 0.05)
+            
+            # Compute residual
+            residual = farm_power_observed - farm_power_base
+            
+            # Add to observations
+            self.X_obs = np.vstack([self.X_obs, [[next_yaw]]])
+            self.y_obs = np.append(self.y_obs, farm_power_observed)
+            self.y_base_obs = np.append(self.y_base_obs, farm_power_base)
+            
+            # Update residual GP with new data
+            y_residuals_all = self.y_obs - self.y_base_obs
+            self.fit_residual_gp(self.X_obs, y_residuals_all)
+            
+            # Update best
+            if farm_power_observed > best_power:
+                best_power = farm_power_observed
+                best_yaw = next_yaw
+                if verbose:
+                    print(f"  Iter {iteration+1:2d}: New best! yaw={best_yaw:.2f}°, power={best_power:.4f} MW")
+            elif verbose and iteration % 5 == 0:
+                print(f"  Iter {iteration+1:2d}: yaw={next_yaw:.2f}°, power={farm_power_observed:.4f} MW, EI={xi:.4f}")
+            
+            # Compute EI for early stopping
+            ei_at_best = self.expected_improvement(best_yaw, best_power, xi)
+            if ei_at_best < 1e-4:
+                if verbose:
+                    print(f"  Converged at iteration {iteration+1} (EI < 1e-4)")
+                break
+            
+            results_history.append({
+                'iteration': iteration + 1,
+                'yaw': next_yaw,
+                'power': farm_power_observed,
+                'xi': xi,
+                'ei': ei_at_best
+            })
+        
+        # Calculate downstream yaw for optimal upstream yaw
+        optimal_downstream_yaw = calculate_wake_deflected_downstream_yaw(
+            best_yaw, self.turbine_spacing_D
+        )
+        
+        # Evaluate at optimal point
+        optimal_power = self._evaluate_farm_power_base(best_yaw)
+        
+        # Evaluate baseline (0° yaw)
+        baseline_power = self._evaluate_farm_power_base(0.0)
+        
+        power_gain = optimal_power - baseline_power
+        power_gain_pct = (power_gain / baseline_power) * 100 if baseline_power > 0 else 0
+        
+        return {
+            'optimal_upstream_misalignment': best_yaw,
+            'optimal_downstream_misalignment': optimal_downstream_yaw,
+            'optimal_total_power': optimal_power,
+            'baseline_total_power': baseline_power,
+            'power_gain_MW': power_gain,
+            'power_gain_percent': power_gain_pct,
+            'n_evaluations': len(self.X_obs),
+            'results_history': results_history,
+            'optimization_method': 'Bayesian Optimization (Transfer Learning)'
+        }
+
+
 # =============================================================================
 # Multi-Pair Turbine Optimizer (Optimizes N pairs individually)
 # =============================================================================
@@ -3799,7 +4191,7 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
         compute_fn = compute_farm_power_physics
         method_name = 'Analytical Physics AD'
         
-    else:
+    elif optimization_method == 'grid_search':
         # =====================================================================
         # Method 3: Grid Search (Fallback)
         # =====================================================================
@@ -3873,6 +4265,103 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
             'turbine_spacing_D': turbine_spacing_D,
             'optimization_method': 'Grid Search',
             'all_results': results_history
+        }
+    
+    elif optimization_method == 'bayesian_transfer':
+        # =====================================================================
+        # Method 4: Bayesian Optimization with Transfer Learning
+        # =====================================================================
+        if verbose:
+            print("Using Bayesian Optimization with transfer learning...")
+            print("Base model: Pre-trained GPR | Residual: Matérn 5/2 GP")
+            print("Acquisition: Expected Improvement (EI) | Optimizer: Multi-start L-BFGS-B")
+            print("Constraint: 0-15° yaw misalignment (expanded from 12° for other methods)")
+        
+        # Initialize Bayesian Transfer Optimizer
+        bo_optimizer = BayesianTransferOptimizer(
+            base_gp_agent=power_agent,
+            wake_agent=wake_agent,
+            turbine_spacing_D=turbine_spacing_D,
+            n_initial_samples=5,
+            xi_lengthscale_range=(0.01, 0.05),
+            n_timesteps=n_timesteps,
+            freestream_velocity=freestream_velocity
+        )
+        
+        # Run Bayesian Optimization
+        bo_results = bo_optimizer.optimize(n_iterations=15, verbose=verbose, xi_range=(0.01, 0.05))
+        
+        # Extract optimal values
+        optimal_upstream = bo_results['optimal_upstream_misalignment']
+        optimal_downstream = bo_results['optimal_downstream_misalignment']
+        optimal_power = bo_results['optimal_total_power']
+        baseline_power = bo_results['baseline_total_power']
+        power_gain = bo_results['power_gain_MW']
+        power_gain_pct = bo_results['power_gain_percent']
+        
+        # Get detailed power breakdown at optimal point
+        upstream_nacelle = yaw_misalignment_to_nacelle_direction(optimal_upstream)
+        downstream_nacelle = yaw_misalignment_to_nacelle_direction(optimal_downstream)
+        
+        # Upstream power
+        upstream_result = power_agent.predict(yaw_angle=upstream_nacelle, n_time_points=n_timesteps)
+        optimal_upstream_power = np.mean(upstream_result['power_mean_MW'])
+        
+        # Wake deficit
+        wake_pred, _ = wake_agent.predict(yaw_angle=upstream_nacelle, n_timesteps=n_timesteps,
+                                          export_vtk=False, verbose=False)
+        vel_mag = np.linalg.norm(wake_pred, axis=2)
+        optimal_deficit = 1.0 - (np.mean(vel_mag) / freestream_velocity)
+        optimal_deficit = np.clip(optimal_deficit, 0, 0.5)
+        
+        # Downstream power
+        k_steering = 0.6
+        upstream_rad = np.radians(optimal_upstream)
+        steering_factor = k_steering * np.sin(upstream_rad) * np.cos(upstream_rad)**2
+        effective_deficit = optimal_deficit * (1.0 - steering_factor)
+        
+        downstream_result = power_agent.predict(yaw_angle=downstream_nacelle, n_time_points=n_timesteps)
+        downstream_power_base = np.mean(downstream_result['power_mean_MW'])
+        optimal_downstream_power = downstream_power_base * (1 - effective_deficit)**3
+        
+        # Baseline values
+        baseline_result = power_agent.predict(yaw_angle=270.0, n_time_points=n_timesteps)
+        baseline_upstream_power = np.mean(baseline_result['power_mean_MW'])
+        
+        baseline_wake_pred, _ = wake_agent.predict(yaw_angle=270.0, n_timesteps=n_timesteps,
+                                                   export_vtk=False, verbose=False)
+        baseline_vel_mag = np.linalg.norm(baseline_wake_pred, axis=2)
+        baseline_deficit = 1.0 - (np.mean(baseline_vel_mag) / freestream_velocity)
+        baseline_deficit = np.clip(baseline_deficit, 0, 0.5)
+        baseline_downstream_power = baseline_upstream_power * (1 - baseline_deficit)**3
+        
+        if verbose:
+            print(f"\n✅ Bayesian Optimization Complete!")
+            print(f"  Optimal upstream yaw: {optimal_upstream:.2f}°")
+            print(f"  Optimal downstream yaw: {optimal_downstream:.2f}° (physics-calculated)")
+            print(f"  Total farm power: {optimal_power:.4f} MW")
+            print(f"  Power gain: {power_gain:.4f} MW (+{power_gain_pct:.2f}%)")
+            print(f"  Total evaluations: {bo_results['n_evaluations']}")
+        
+        return {
+            'optimal_upstream_misalignment': optimal_upstream,
+            'optimal_downstream_misalignment': optimal_downstream,
+            'optimal_upstream_nacelle': upstream_nacelle,
+            'optimal_downstream_nacelle': downstream_nacelle,
+            'optimal_upstream_power': optimal_upstream_power,
+            'optimal_downstream_power': optimal_downstream_power,
+            'optimal_total_power': optimal_power,
+            'optimal_wake_deficit': optimal_deficit,
+            'baseline_total_power': baseline_power,
+            'baseline_upstream_power': baseline_upstream_power,
+            'baseline_downstream_power': baseline_downstream_power,
+            'baseline_wake_deficit': baseline_deficit,
+            'power_gain_MW': power_gain,
+            'power_gain_percent': power_gain_pct,
+            'turbine_spacing_D': turbine_spacing_D,
+            'optimization_method': 'Bayesian Optimization (Transfer Learning)',
+            'n_evaluations': bo_results['n_evaluations'],
+            'all_results': bo_results['results_history']
         }
     
     # =========================================================================
@@ -4466,11 +4955,12 @@ def main():
             st.markdown("**Optimization Method:**")
             opt_method = st.selectbox(
                 "Select method for wake steering optimization:",
-                options=['analytical_physics', 'ml_surrogate', 'grid_search'],
+                options=['analytical_physics', 'ml_surrogate', 'grid_search', 'bayesian_transfer'],
                 format_func=lambda x: {
                     'ml_surrogate': '🧠 ML Surrogate AD (Most Accurate)',
                     'analytical_physics': '📐 Analytical Physics AD (Fastest)',
-                    'grid_search': '🔍 Grid Search (Brute-force)'
+                    'grid_search': '🔍 Grid Search (Brute-force)',
+                    'bayesian_transfer': '🎯 Bayesian Optimization (Transfer Learning)'
                 }[x],
                 index=0,
                 help="Choose optimization algorithm for yaw angle optimization"
@@ -4506,6 +4996,13 @@ def main():
                 - Brute-force evaluation of all combinations
                 - No gradients, guaranteed to find best in search space
                 - Slowest for fine grids but most robust
+                
+                **🎯 Bayesian Optimization (Transfer Learning):**
+                - Uses pre-trained GPR as base + residual GP for corrections
+                - Expected Improvement (EI) with Matérn 5/2 kernel
+                - Multi-start L-BFGS optimization of acquisition function
+                - Constraint: 0-15° yaw misalignment (vs 12° for other methods)
+                - Efficient exploration-exploitation trade-off (~15-20 iterations)
                 """)
             
             st.markdown("---")
