@@ -33,6 +33,9 @@ sys.path.insert(0, r"C:\Users\mandart\A_MANDAR_DOCUMENTS\HAM_Wind_Energy")
 # Import local rotor power agent
 from rotor_power_agent import RotorPowerAgent
 
+# Import reviewer agent
+from reviewer_agent import WindTurbineReviewerAgent
+
 # Try to import TT-OpInf based Wake Flow Agent
 try:
     from tt_opinf_inference_agent import WakeFlowAgent
@@ -541,7 +544,8 @@ class WindTurbineOrchestrator:
     5. Generate comprehensive report
     """
     
-    def __init__(self, rotor_power_model_path: str = None):
+    def __init__(self, rotor_power_model_path: str = None, config: Dict[str, Any] = None, 
+                 reviewer_mode: str = "advisory", reviewer_enabled: bool = True):
         print("\n" + "="*70)
         print("  WIND TURBINE MULTI-AGENT ORCHESTRATOR")
         print("="*70)
@@ -554,14 +558,29 @@ class WindTurbineOrchestrator:
         self.power_agent = RotorPowerAgentWrapper(rotor_power_model_path)
         self.wake_agent = WakeFlowAgentWrapper()
         
+        # Initialize reviewer agent
+        self.config = config or {}
+        self.reviewer_agent = WindTurbineReviewerAgent(
+            config=self.config,
+            mode=reviewer_mode,
+            enabled=reviewer_enabled
+        )
+        
         print("\n" + "-"*70)
         print("All agents initialized. Ready for analysis.")
+        if reviewer_enabled:
+            print(f"Expert Reviewer: ENABLED (mode={reviewer_mode})")
+        else:
+            print("Expert Reviewer: DISABLED")
         print("-"*70)
     
-    def run_analysis(self, location: str = "Boulder, Colorado", 
+    async def run_analysis(self, location: str = "Boulder, Colorado", 
                      n_time_points: int = 100,
                      create_wake_animation: bool = True,
-                     export_wake_vtk: bool = False) -> Dict[str, Any]:
+                     export_wake_vtk: bool = False,
+                     agent2b_result: Optional[Dict[str, Any]] = None,
+                     turbine_pairs: Optional[Dict[str, Any]] = None,
+                     optimization_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Run full multi-agent analysis.
         
@@ -570,9 +589,12 @@ class WindTurbineOrchestrator:
             n_time_points: Number of time points for predictions
             create_wake_animation: Whether to generate wake animation
             export_wake_vtk: Whether to export VTK files for wake visualization
+            agent2b_result: Optional Agent 2B LLM expert result
+            turbine_pairs: Optional Agent 2C/2D turbine pair result
+            optimization_result: Optional optimization results from Agent 3
             
         Returns:
-            Dict with results from all agents
+            Dict with results from all agents and expert reviews
         """
         print("\n" + "🚀"*35)
         print("  STARTING MULTI-AGENT ANALYSIS")
@@ -580,7 +602,8 @@ class WindTurbineOrchestrator:
         
         results = {
             "timestamp": datetime.now().isoformat(),
-            "location": location
+            "location": location,
+            "reviews": {}  # Store all expert reviews
         }
         
         # AGENT 1: Get weather conditions
@@ -592,9 +615,43 @@ class WindTurbineOrchestrator:
         results["expert_analysis"] = expert_analysis
         suggested_yaw = expert_analysis["suggested_yaw"]
         
+        # CHECKPOINT 1: Review Agent 2 outputs
+        review1 = await self.reviewer_agent.review_agent2(
+            weather_data=weather_data,
+            expert_analysis=expert_analysis,
+            agent2b_result=agent2b_result,
+            turbine_pairs=turbine_pairs
+        )
+        results["reviews"]["checkpoint1_agent2"] = review1
+        
+        # Check if workflow should continue (blocking mode with critical issues)
+        if not review1.get("allow_continue", True):
+            print("\n" + "🛑"*35)
+            print("  WORKFLOW HALTED: Critical issues detected in Agent 2")
+            print("🛑"*35 + "\n")
+            results["status"] = "halted_at_checkpoint1"
+            return results
+        
         # AGENT 3: Predict power output
         power_prediction = self.power_agent.predict_power(suggested_yaw, n_time_points)
         results["power_prediction"] = power_prediction
+        
+        # CHECKPOINT 2: Review Agent 3 outputs
+        review2 = await self.reviewer_agent.review_agent3(
+            weather_data=weather_data,
+            expert_analysis=expert_analysis,
+            power_prediction=power_prediction,
+            optimization_result=optimization_result
+        )
+        results["reviews"]["checkpoint2_agent3"] = review2
+        
+        # Check if workflow should continue
+        if not review2.get("allow_continue", True):
+            print("\n" + "🛑"*35)
+            print("  WORKFLOW HALTED: Critical issues detected in Agent 3")
+            print("🛑"*35 + "\n")
+            results["status"] = "halted_at_checkpoint2"
+            return results
         
         # AGENT 4: Predict wake flow (agent is callable, animation/vtk handled internally)
         wake_prediction = self.wake_agent.predict_wake(
@@ -609,10 +666,37 @@ class WindTurbineOrchestrator:
         if wake_prediction is not None:
             results["wake_statistics"] = self.wake_agent.get_wake_statistics(wake_prediction)
         
+        # CHECKPOINT 3: Review Agent 4 outputs
+        review3 = await self.reviewer_agent.review_agent4(
+            weather_data=weather_data,
+            expert_analysis=expert_analysis,
+            wake_prediction=wake_prediction or {}
+        )
+        results["reviews"]["checkpoint3_agent4"] = review3
+        
+        # Check if workflow should continue
+        if not review3.get("allow_continue", True):
+            print("\n" + "🛑"*35)
+            print("  WORKFLOW HALTED: Critical issues detected in Agent 4")
+            print("🛑"*35 + "\n")
+            results["status"] = "halted_at_checkpoint3"
+            return results
+        
+        # Generate final comprehensive review
+        final_review = await self.reviewer_agent.generate_final_review(results)
+        results["reviews"]["final_review"] = final_review
+        
         print("\n" + "✅"*35)
         print("  ANALYSIS COMPLETE")
+        if final_review.get("overall_status") == "FAILED":
+            print("  ⚠️ WARNING: Analysis contains critical issues")
+        elif final_review.get("overall_status") == "WARNING":
+            print("  ⚠️ Analysis completed with warnings")
+        else:
+            print("  ✅ All validation checks passed")
         print("✅"*35)
         
+        results["status"] = "completed"
         return results
     
     def generate_report(self, results: Dict[str, Any], save_path: str = None) -> str:
@@ -695,7 +779,52 @@ class WindTurbineOrchestrator:
 """
         
         report += f"""└──────────────────────────────────────────────────────────────────────────────┘
-
+"""
+        
+        # Add Expert Review section if available
+        final_review = results.get("reviews", {}).get("final_review", {})
+        if final_review and final_review.get("overall_status"):
+            status = final_review.get("overall_status", "UNKNOWN")
+            status_message = final_review.get('status_message', 'N/A')[:56]  # Truncate if needed
+            
+            report += f"""
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 5. EXPERT REVIEW ASSESSMENT                                                  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  Overall Status:   {status:<56}  │
+│  Status Message:   {status_message:<56}  │
+│                                                                              │
+│  Critical Issues:  {final_review.get('critical_count', 0):<56}  │
+│  Warnings:         {final_review.get('warning_count', 0):<56}  │
+│  Info Messages:    {final_review.get('info_count', 0):<56}  │
+│  Checkpoints:      {final_review.get('checkpoint_count', 0):<56}  │
+"""
+            
+            # Add key findings if any
+            key_findings = final_review.get("key_findings", [])
+            if key_findings:
+                report += "├──────────────────────────────────────────────────────────────────────────────┤\n"
+                report += "│  Key Findings:                                                               │\n"
+                for finding in key_findings[:5]:  # Limit to 5 findings
+                    finding_type = finding.get("type", "info")
+                    msg = finding.get("message", "")[:70]  # Truncate long messages
+                    prefix = "[CRITICAL]" if finding_type == "critical" else "[WARNING]" if finding_type == "warning" else "[INFO]"
+                    line_text = f"{prefix} {msg}"[:74]  # Total width 74
+                    report += f"│  {line_text:<76}│\n"
+            
+            # Add recommendations
+            recommendations = final_review.get("recommendations", [])
+            if recommendations:
+                report += "├──────────────────────────────────────────────────────────────────────────────┤\n"
+                report += "│  Recommendations:                                                            │\n"
+                for rec in recommendations[:3]:  # Limit to 3 recommendations
+                    # Strip emojis and truncate
+                    clean_rec = rec.replace("✅", "").replace("⚠️", "").replace("🔴", "").strip()[:74]
+                    report += f"│  {clean_rec:<76}│\n"
+            
+            report += "└──────────────────────────────────────────────────────────────────────────────┘\n"
+        
+        report += f"""
 ═══════════════════════════════════════════════════════════════════════════════
                               END OF REPORT
 ═══════════════════════════════════════════════════════════════════════════════

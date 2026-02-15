@@ -18,6 +18,7 @@ import os
 import sys
 import torch
 import math
+import asyncio
 from pathlib import Path
 from datetime import datetime
 import openai
@@ -41,6 +42,47 @@ RESULT_ML_YAW = SCRIPT_DIR.parent
 PROJECT_ROOT = RESULT_ML_YAW.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
+
+# Load environment variables from .env file (for local development / VS Code)
+from dotenv import load_dotenv
+load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
+
+
+def get_api_config(provider: str) -> tuple:
+    """
+    Get API base URL and key for a given LLM provider.
+
+    Loads secrets from (in priority order):
+    1. Streamlit secrets (st.secrets) - for Streamlit Cloud deployment
+    2. Environment variables (.env file) - for local VS Code development
+
+    Returns:
+        tuple: (api_base, api_key)
+    """
+    def _get_secret(key: str, fallback: str = "") -> str:
+        """Try Streamlit secrets first, then env vars."""
+        try:
+            return st.secrets[key]
+        except (KeyError, FileNotFoundError, AttributeError):
+            return os.getenv(key, fallback)
+
+    if provider == "NTNU":
+        api_base = _get_secret("NTNU_API_BASE", "https://llm.hpc.ntnu.no/v1")
+        api_key = _get_secret("NTNU_API_KEY", "")
+    elif provider == "OpenAI":
+        api_base = "https://api.openai.com/v1"
+        api_key = _get_secret("OPENAI_API_KEY", "")
+    elif provider == "Ollama":
+        api_base = "http://localhost:11434/v1"
+        api_key = "ollama"
+    elif provider == "Google":
+        api_base = "https://generativelanguage.googleapis.com/v1beta"
+        api_key = _get_secret("GOOGLE_API_KEY", "")
+    else:  # Anthropic
+        api_base = "https://api.anthropic.com/v1"
+        api_key = _get_secret("ANTHROPIC_API_KEY", "")
+
+    return api_base, api_key
 
 # Page configuration
 st.set_page_config(
@@ -174,6 +216,15 @@ def load_agents():
     wake_agent = WakeFlowAgent()
     
     return power_agent, wake_agent
+
+
+# Import reviewer agent (not cached - initialized per analysis with user settings)
+try:
+    from reviewer_agent import WindTurbineReviewerAgent
+    REVIEWER_AGENT_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: ReviewerAgent not available: {e}")
+    REVIEWER_AGENT_AVAILABLE = False
 
 
 # =============================================================================
@@ -1683,22 +1734,8 @@ Use technical terminology appropriately but explain complex concepts clearly."""
             prompt = f"{context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer:"
             
             try:
-                # Get API configuration
-                if llm_provider == "NTNU":
-                    api_base = "https://llm.hpc.ntnu.no/v1"
-                    api_key = "sk-48COknyy7BlFg8vbN1ywgg"
-                elif llm_provider == "OpenAI":
-                    api_base = "https://api.openai.com/v1"
-                    api_key = os.getenv("OPENAI_API_KEY", "your-openai-key")
-                elif llm_provider == "Ollama":
-                    api_base = "http://localhost:11434/v1"
-                    api_key = "ollama"
-                elif llm_provider == "Google":
-                    api_base = "https://generativelanguage.googleapis.com/v1beta"
-                    api_key = os.getenv("GOOGLE_API_KEY", "your-google-key")
-                else:  # Anthropic
-                    api_base = "https://api.anthropic.com/v1"
-                    api_key = os.getenv("ANTHROPIC_API_KEY", "your-anthropic-key")
+                # Get API configuration from environment / Streamlit secrets
+                api_base, api_key = get_api_config(llm_provider)
                 
                 # Query LLM with lower temperature for more deterministic responses
                 response = query_local_llm(
@@ -2317,22 +2354,8 @@ Respond with JSON:"""
         print(f"[Agent 2C Debug] Analyzing {len(turbine_locations)} turbines", file=sys.stderr)
         print(f"[Agent 2C Debug] Wind conditions: {wind_speed}m/s from {wind_dir}°", file=sys.stderr)
         
-        # Get LLM configuration directly
-        if provider == "NTNU":
-            api_base = "https://llm.hpc.ntnu.no/v1"
-            api_key = "sk-48COknyy7BlFg8vbN1ywgg"  # NTNU API key from config
-        elif provider == "OpenAI":
-            api_base = "https://api.openai.com/v1"
-            api_key = os.getenv("OPENAI_API_KEY", "your-openai-key")
-        elif provider == "Ollama":
-            api_base = "http://localhost:11434/v1"
-            api_key = "ollama"  # Ollama doesn't require real API key
-        elif provider == "Google":
-            api_base = "https://generativelanguage.googleapis.com/v1beta"
-            api_key = os.getenv("GOOGLE_API_KEY", "your-google-key")
-        else:  # Anthropic
-            api_base = "https://api.anthropic.com/v1"
-            api_key = os.getenv("ANTHROPIC_API_KEY", "your-anthropic-key")
+        # Get LLM configuration from environment / Streamlit secrets
+        api_base, api_key = get_api_config(provider)
         
         config = {
             'provider': provider,
@@ -2457,6 +2480,14 @@ Format: T1→T2, T3→T4, etc."""
             
             llm_pairs = analysis_data.get('critical_pairs', [])
             
+            # DEBUG: Log what the LLM returned
+            import sys
+            print(f"\n[DEBUG Agent 2C] LLM returned {len(llm_pairs)} pairs", file=sys.stderr)
+            if llm_pairs:
+                print(f"[DEBUG Agent 2C] First pair content: {llm_pairs[0]}", file=sys.stderr)
+                print(f"[DEBUG Agent 2C] First pair keys: {list(llm_pairs[0].keys())}", file=sys.stderr)
+                print(f"[DEBUG Agent 2C] 'distance_km' in first pair? {'distance_km' in llm_pairs[0]}", file=sys.stderr)
+            
             # Validate each pair to ensure downstream turbine is actually downstream
             validated_pairs = []
             rejected_pairs = []
@@ -2479,6 +2510,15 @@ Format: T1→T2, T3→T4, etc."""
                     validated_pair['validated'] = True
                     validated_pair['bearing_deg'] = round(bearing, 1)
                     validated_pair['angle_deviation_deg'] = round(angle_diff, 1)
+                    
+                    # Calculate distance in rotor diameters for optimizer (NREL 5MW: D=126m)
+                    if 'distance_km' in validated_pair:
+                        distance_m = validated_pair['distance_km'] * 1000.0
+                        validated_pair['distance_rotor_diameters'] = distance_m / 126.0
+                        print(f"[DEBUG Agent 2C] Pair {upstream_id}->{downstream_id}: distance_km={validated_pair['distance_km']:.3f}, distance_rotor_diameters={validated_pair['distance_rotor_diameters']:.2f}", file=sys.stderr)
+                    else:
+                        print(f"[DEBUG Agent 2C] Pair {upstream_id}->{downstream_id}: 'distance_km' NOT FOUND in validated_pair! Keys: {list(validated_pair.keys())}", file=sys.stderr)
+                    
                     validated_pairs.append(validated_pair)
                 else:
                     rejected_pairs.append({
@@ -2900,8 +2940,11 @@ def get_wake_influenced_turbine_pairs(turbine_locations, wind_speed, wind_direct
     
     # Format results for compatibility with Agent 2C output
     formatted_pairs = []
+    import sys
+    print(f"\n[DEBUG Agent 2D] Formatting {len(wake_pairs[:10])} pairs with distance_rotor_diameters", file=sys.stderr)
+    
     for pair in wake_pairs[:10]:  # Limit to top 10 most critical pairs
-        formatted_pairs.append({
+        formatted_pair = {
             'upstream_turbine': pair['upstream_turbine'],  # Consistent with Agent 2C
             'downstream_turbine': pair['downstream_turbine'],  # Consistent with Agent 2C
             'distance_km': pair['distance_m'] / 1000.0,
@@ -2911,8 +2954,14 @@ def get_wake_influenced_turbine_pairs(turbine_locations, wind_speed, wind_direct
             ),
             'priority': len(formatted_pairs) + 1,
             'distance_rotor_diameters': pair['distance_D'],
+            'downstream_distance_D': pair['downstream_distance_m'] / rotor_diameter,
+            'lateral_offset_D': pair['lateral_distance_m'] / rotor_diameter,
             'wake_deficit': pair['wake_deficit']
-        })
+        }
+        formatted_pairs.append(formatted_pair)
+        
+        if len(formatted_pairs) <= 2:  # Log first 2 pairs
+            print(f"[DEBUG Agent 2D] Pair {formatted_pair['upstream_turbine']}->{formatted_pair['downstream_turbine']}: distance_rotor_diameters={formatted_pair['distance_rotor_diameters']:.2f}", file=sys.stderr)
     
     # Calculate summary statistics
     total_pairs = len(wake_pairs)
@@ -3046,7 +3095,13 @@ def load_llm_config(config_path: str = None):
     try:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
-        return config.get('llm', {})
+        llm_config = config.get('llm', {})
+        # Resolve environment variable placeholders like ${NTNU_API_KEY}
+        for key, value in llm_config.items():
+            if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+                env_var = value[2:-1]
+                llm_config[key] = os.getenv(env_var, value)
+        return llm_config
     except FileNotFoundError:
         st.warning(f"⚠️ Config file not found at {config_path}. Using default values.")
         return {
@@ -3166,22 +3221,8 @@ def get_llm_expert_recommendation(wind_speed: float, wind_direction: float, conf
         provider = getattr(st.session_state, 'llm_provider', 'NTNU')
         model = getattr(st.session_state, 'selected_model', 'moonshotai/Kimi-K2.5')
         
-        # Set API base URL and key based on provider
-        if provider == "NTNU":
-            api_base = "https://llm.hpc.ntnu.no/v1"
-            api_key = "sk-48COknyy7BlFg8vbN1ywgg"  # NTNU API key from config
-        elif provider == "OpenAI":
-            api_base = "https://api.openai.com/v1"
-            api_key = os.getenv("OPENAI_API_KEY", "your-openai-key")
-        elif provider == "Ollama":
-            api_base = "http://localhost:11434/v1"
-            api_key = "ollama"  # Ollama doesn't require real API key
-        elif provider == "Google":
-            api_base = "https://generativelanguage.googleapis.com/v1beta"
-            api_key = os.getenv("GOOGLE_API_KEY", "your-google-key")
-        else:  # Anthropic
-            api_base = "https://api.anthropic.com/v1"
-            api_key = os.getenv("ANTHROPIC_API_KEY", "your-anthropic-key")
+        # Get API configuration from environment / Streamlit secrets
+        api_base, api_key = get_api_config(provider)
         
         config = {
             'provider': provider,
@@ -3312,7 +3353,7 @@ class DifferentiablePowerSurrogate(torch.nn.Module):
         
         for yaw in yaw_samples:
             result = power_agent.predict(yaw_angle=yaw, n_time_points=50, return_samples=False)
-            power_samples.append(np.mean(result['power_mean_MW']))
+            power_samples.append(extract_settled_power(result['power_mean_MW']))
         
         self.yaw_samples = torch.tensor(yaw_samples, dtype=torch.float64)
         self.power_samples = torch.tensor(power_samples, dtype=torch.float64)
@@ -3423,12 +3464,12 @@ class BayesianTransferOptimizer:
     - Constraint: yaw angles between 0-15 degrees
     """
     
-    def __init__(self, base_gp_agent, wake_agent, turbine_spacing_D=7.0, 
-                 n_initial_samples=5, xi_lengthscale_range=(0.01, 0.05), 
-                 n_timesteps=50, freestream_velocity=8.5):
+    def __init__(self, base_gp_agent, wake_agent, turbine_spacing_D=7.0,
+                 n_initial_samples=5, xi_lengthscale_range=(0.01, 0.05),
+                 n_timesteps=50, freestream_velocity=8.5, lateral_offset_D=0.0):
         """
         Initialize Bayesian Transfer Optimizer.
-        
+
         Parameters:
         -----------
         base_gp_agent : RotorPowerAgent
@@ -3436,7 +3477,7 @@ class BayesianTransferOptimizer:
         wake_agent : WakeFlowAgent
             Wake flow prediction agent
         turbine_spacing_D : float
-            Turbine spacing in rotor diameters
+            Streamwise turbine spacing in rotor diameters
         n_initial_samples : int
             Number of initial random samples
         xi_lengthscale_range : tuple
@@ -3445,13 +3486,16 @@ class BayesianTransferOptimizer:
             Number of timesteps for predictions
         freestream_velocity : float
             Freestream wind velocity (m/s)
+        lateral_offset_D : float
+            Cross-wind lateral offset of downstream turbine in rotor diameters (default: 0.0)
         """
         from sklearn.gaussian_process import GaussianProcessRegressor
         from sklearn.gaussian_process.kernels import Matern, ConstantKernel, RBF
-        
+
         self.base_gp_agent = base_gp_agent
         self.wake_agent = wake_agent
         self.turbine_spacing_D = turbine_spacing_D
+        self.lateral_offset_D = lateral_offset_D
         self.n_initial_samples = n_initial_samples
         self.n_timesteps = n_timesteps
         self.freestream_velocity = freestream_velocity
@@ -3478,8 +3522,9 @@ class BayesianTransferOptimizer:
         
         This simulates actual observations and allows us to compute residuals.
         """
-        np.random.seed(42)
-        
+        # Spacing-dependent seed so different turbine pairs explore different initial yaw angles
+        np.random.seed(int(hash((self.turbine_spacing_D, self.lateral_offset_D)) % 2**31))
+
         # Sample random yaw angles in the range
         yaw_samples = np.random.uniform(yaw_range[0], yaw_range[1], self.n_initial_samples)
         
@@ -3491,9 +3536,9 @@ class BayesianTransferOptimizer:
             # Get base GP prediction for farm power
             farm_power_base = self._evaluate_farm_power_base(yaw_misalign)
             
-            # Add synthetic Gaussian noise to simulate real observations
-            # Noise level: 0.05 MW standard deviation
-            farm_power_observed = farm_power_base + np.random.normal(0, 0.05)
+            # Use actual farm power without synthetic noise — synthetic noise
+            # causes the residual GP to train on pure noise, masking real differences
+            farm_power_observed = farm_power_base
             
             X_init.append([yaw_misalign])
             y_init.append(farm_power_observed)
@@ -3511,12 +3556,12 @@ class BayesianTransferOptimizer:
     def _evaluate_farm_power_base(self, yaw_misalignment):
         """
         Evaluate total farm power using base GP model (no residual correction).
-        
+
         Parameters:
         -----------
         yaw_misalignment : float
             Upstream turbine yaw misalignment (degrees)
-        
+
         Returns:
         --------
         float
@@ -3526,39 +3571,34 @@ class BayesianTransferOptimizer:
         downstream_misalign = calculate_wake_deflected_downstream_yaw(
             yaw_misalignment, self.turbine_spacing_D
         )
-        
+
         # Convert to nacelle directions
         upstream_nacelle = 270.0 + yaw_misalignment
         downstream_nacelle = 270.0 + downstream_misalign
-        
+
         # Get upstream power from base GP
         upstream_result = self.base_gp_agent.predict(
             yaw_angle=upstream_nacelle, n_time_points=self.n_timesteps
         )
-        upstream_power = np.mean(upstream_result['power_mean_MW'])
-        
-        # Get wake deficit
-        wake_pred, _ = self.wake_agent.predict(
-            yaw_angle=upstream_nacelle, n_timesteps=self.n_timesteps,
-            export_vtk=False, verbose=False
+        upstream_power = extract_settled_power(upstream_result['power_mean_MW'])
+
+        # Distance-dependent wake deficit using Bastankhah & Porté-Agel (2016) model
+        # Accounts for actual streamwise spacing and cross-wind lateral offset
+        effective_deficit = calculate_wake_deficit(
+            turbine_spacing_D=self.turbine_spacing_D,
+            upstream_yaw_deg=yaw_misalignment,
+            thrust_coefficient=0.8,
+            wake_expansion_coeff=0.022,
+            lateral_offset_D=self.lateral_offset_D
         )
-        vel_mag = np.linalg.norm(wake_pred, axis=2)
-        base_deficit = 1.0 - (np.mean(vel_mag) / self.freestream_velocity)
-        base_deficit = np.clip(base_deficit, 0, 0.5)
-        
-        # Wake steering effect
-        k_steering = 0.6
-        upstream_rad = np.radians(yaw_misalignment)
-        steering_factor = k_steering * np.sin(upstream_rad) * np.cos(upstream_rad)**2
-        effective_deficit = base_deficit * (1.0 - steering_factor)
-        
+
         # Get downstream power
         downstream_result = self.base_gp_agent.predict(
             yaw_angle=downstream_nacelle, n_time_points=self.n_timesteps
         )
-        downstream_power_base = np.mean(downstream_result['power_mean_MW'])
+        downstream_power_base = extract_settled_power(downstream_result['power_mean_MW'])
         downstream_power = downstream_power_base * (1 - effective_deficit)**3
-        
+
         total_power = upstream_power + downstream_power
         return total_power
     
@@ -3736,8 +3776,8 @@ class BayesianTransferOptimizer:
             
             # Evaluate farm power at next point
             farm_power_base = self._evaluate_farm_power_base(next_yaw)
-            farm_power_observed = farm_power_base + np.random.normal(0, 0.05)
-            
+            farm_power_observed = farm_power_base
+
             # Compute residual
             residual = farm_power_observed - farm_power_base
             
@@ -3843,6 +3883,17 @@ def optimize_multiple_turbine_pairs(turbine_pairs_data, power_agent, wake_agent,
     turbine_pairs = turbine_pairs_data['turbine_pairs']
     turbine_chains = turbine_pairs_data.get('turbine_chains', [])
     
+    # DEBUG: Print turbine pairs structure
+    if verbose or True:  # Always print for debugging
+        print(f"\n[DEBUG] optimize_multiple_turbine_pairs called with {len(turbine_pairs)} pairs", file=sys.stderr)
+        if turbine_pairs:
+            print(f"[DEBUG] First pair structure: {turbine_pairs[0]}", file=sys.stderr)
+            print(f"[DEBUG] First pair keys: {list(turbine_pairs[0].keys())}", file=sys.stderr)
+            if 'distance_rotor_diameters' in turbine_pairs[0]:
+                print(f"[DEBUG] First pair has distance_rotor_diameters: {turbine_pairs[0]['distance_rotor_diameters']}", file=sys.stderr)
+            else:
+                print(f"[DEBUG] WARNING: First pair MISSING distance_rotor_diameters key!", file=sys.stderr)
+    
     if not turbine_pairs:
         return {
             'status': 'no_pairs',
@@ -3872,13 +3923,80 @@ def optimize_multiple_turbine_pairs(turbine_pairs_data, power_agent, wake_agent,
         
         # Always treat as simple two-turbine pair (no chain merging)
         turbine_list = [upstream_id, downstream_id]
-        
+
+        # Extract spatial data from pair (from Agent 2D wake analysis)
+        # downstream_distance_D = streamwise (wind-aligned) distance in rotor diameters
+        # lateral_offset_D = cross-wind lateral offset in rotor diameters
+        # distance_rotor_diameters = Euclidean distance (kept for display)
+        euclidean_D = pair.get('distance_rotor_diameters', 7.0)
+        downstream_distance_D = pair.get('downstream_distance_D', euclidean_D)  # Fallback to Euclidean
+        lateral_offset_D = pair.get('lateral_offset_D', 0.0)  # Fallback to on-centerline
+
+        # DEBUG: Print spatial data extraction
+        print(f"\n[DEBUG] Pair {idx+1}: IDs={upstream_id}->{downstream_id}", file=sys.stderr)
+        print(f"[DEBUG] Pair {idx+1}: Keys in pair dict = {list(pair.keys())}", file=sys.stderr)
+        print(f"[DEBUG] Pair {idx+1}: Euclidean={euclidean_D:.2f}D, Streamwise={downstream_distance_D:.2f}D, Lateral={lateral_offset_D:.2f}D", file=sys.stderr)
+
+        if verbose:
+            print(f"  Turbine {upstream_id} -> {downstream_id}, Streamwise: {downstream_distance_D:.2f}D, Lateral offset: {lateral_offset_D:.2f}D")
+
+        # Check baseline wake deficit at 0° yaw to determine if optimization is needed
+        baseline_deficit = calculate_wake_deficit(
+            turbine_spacing_D=downstream_distance_D,
+            upstream_yaw_deg=0.0,
+            lateral_offset_D=lateral_offset_D
+        )
+
+        # Classify wake overlap
+        k_star = 0.022
+        epsilon = 0.2
+        sigma_D = k_star * downstream_distance_D + epsilon  # Wake width at downstream position
+        rotor_radius_D = 0.5  # Half rotor diameter
+        if lateral_offset_D > sigma_D * 3.0 + rotor_radius_D:
+            overlap_class = 'none'
+        elif lateral_offset_D > sigma_D * 1.5:
+            overlap_class = 'partial'
+        else:
+            overlap_class = 'full'
+
+        print(f"[DEBUG] Pair {idx+1}: Baseline deficit={baseline_deficit:.4f}, Wake σ={sigma_D:.2f}D, Overlap={overlap_class}", file=sys.stderr)
+
+        # Short-circuit: if baseline deficit is negligible, no wake steering needed
+        if baseline_deficit < 0.01:
+            if verbose:
+                print(f"  ⏭️  Skipping pair {idx+1}: Baseline wake deficit {baseline_deficit:.4f} < 1% — no wake steering needed")
+            print(f"[DEBUG] Pair {idx+1}: SKIPPED — negligible wake influence (deficit={baseline_deficit:.4f})", file=sys.stderr)
+
+            # Return zero-gain result for this pair
+            optimization_results.append({
+                'pair_index': idx + 1,
+                'turbine_ids': turbine_list,
+                'upstream_id': upstream_id,
+                'downstream_id': downstream_id,
+                'upstream_yaw': 0.0,
+                'downstream_yaw': 0.0,
+                'turbine_spacing_D': euclidean_D,
+                'downstream_distance_D': downstream_distance_D,
+                'lateral_offset_D': lateral_offset_D,
+                'overlap_class': overlap_class,
+                'baseline_deficit': baseline_deficit,
+                'optimal_yaw_angles': {upstream_id: 0.0, downstream_id: 0.0},
+                'power_gain_MW': 0.0,
+                'power_gain_percent': 0.0,
+                'optimization_method': f'{optimization_method} (skipped: no wake influence)',
+                'baseline_power': 0.0,
+                'optimized_power': 0.0,
+                'sensitivity_figure': None
+            })
+            continue
+
         try:
-            # Optimize this pair using the two-turbine optimizer
+            # Optimize this pair using streamwise distance and lateral offset
             opt_result = optimize_two_turbine_farm(
                 power_agent=power_agent,
                 wake_agent=wake_agent,
-                turbine_spacing_D=7.0,
+                turbine_spacing_D=downstream_distance_D,  # Streamwise distance (not Euclidean)
+                lateral_offset_D=lateral_offset_D,  # Cross-wind offset
                 n_timesteps=n_timesteps,
                 verbose=verbose,
                 optimization_method=optimization_method
@@ -3887,6 +4005,33 @@ def optimize_multiple_turbine_pairs(turbine_pairs_data, power_agent, wake_agent,
             # Build result for this pair
             # In wake steering: only upstream turbine gets yaw misalignment, downstream stays at 0°
             upstream_yaw = opt_result.get('optimal_upstream_misalignment', 0.0)
+            power_gain = opt_result.get('power_gain_MW', 0.0)
+
+            # Guard: if optimization produces negative gain, revert to baseline (0° yaw)
+            if power_gain < 0:
+                print(f"[DEBUG] Pair {idx+1}: Negative gain ({power_gain:.4f} MW) — reverting to baseline (0° yaw)", file=sys.stderr)
+                upstream_yaw = 0.0
+                opt_result['optimal_upstream_misalignment'] = 0.0
+                opt_result['optimal_downstream_misalignment'] = 0.0
+                opt_result['optimal_upstream_nacelle'] = 270.0
+                opt_result['optimal_downstream_nacelle'] = 270.0
+                opt_result['optimal_upstream_power'] = opt_result.get('baseline_upstream_power', 0.0)
+                opt_result['optimal_downstream_power'] = opt_result.get('baseline_downstream_power', 0.0)
+                opt_result['optimal_total_power'] = opt_result.get('baseline_total_power', 0.0)
+                opt_result['power_gain_MW'] = 0.0
+                opt_result['power_gain_percent'] = 0.0
+                opt_result['optimization_method'] = opt_result.get('optimization_method', optimization_method) + ' (reverted: negative gain)'
+
+            # DEBUG: Print optimization results
+            print(f"[DEBUG] Pair {idx+1}: Optimization returned keys = {list(opt_result.keys())}", file=sys.stderr)
+            print(f"[DEBUG] Pair {idx+1}: optimal_upstream_misalignment = {upstream_yaw}", file=sys.stderr)
+            print(f"[DEBUG] Pair {idx+1}: optimal_total_power = {opt_result.get('optimal_total_power', 'N/A')}", file=sys.stderr)
+            print(f"[DEBUG] Pair {idx+1}: power_gain_MW = {opt_result.get('power_gain_MW', 'N/A')}", file=sys.stderr)
+            print(f"[DEBUG] Pair {idx+1}: optimization_method = {optimization_method}", file=sys.stderr)
+            if upstream_yaw == 0.0:
+                print(f"[DEBUG] Pair {idx+1}: WARNING - Upstream yaw is ZERO! Check if optimization actually ran.", file=sys.stderr)
+                if 'error' in opt_result:
+                    print(f"[DEBUG] Pair {idx+1}: ERROR in result: {opt_result['error']}", file=sys.stderr)
             
             pair_result = {
                 'pair_index': idx + 1,
@@ -3895,6 +4040,11 @@ def optimize_multiple_turbine_pairs(turbine_pairs_data, power_agent, wake_agent,
                 'downstream_id': downstream_id,
                 'upstream_yaw': upstream_yaw,
                 'downstream_yaw': 0.0,  # Always 0° for wake steering
+                'turbine_spacing_D': euclidean_D,  # Euclidean spacing for display
+                'downstream_distance_D': downstream_distance_D,  # Streamwise distance used
+                'lateral_offset_D': lateral_offset_D,  # Cross-wind offset
+                'overlap_class': overlap_class,  # 'full', 'partial', or 'none'
+                'baseline_deficit': baseline_deficit,
                 'optimal_yaw_angles': {
                     upstream_id: upstream_yaw,
                     downstream_id: 0.0  # Downstream stays aligned with wind
@@ -3907,7 +4057,8 @@ def optimize_multiple_turbine_pairs(turbine_pairs_data, power_agent, wake_agent,
                 'upstream_power_baseline': opt_result.get('baseline_upstream_power', 0.0),
                 'upstream_power_optimized': opt_result.get('optimal_upstream_power', 0.0),
                 'downstream_power_baseline': opt_result.get('baseline_downstream_power', 0.0),
-                'downstream_power_optimized': opt_result.get('optimal_downstream_power', 0.0)
+                'downstream_power_optimized': opt_result.get('optimal_downstream_power', 0.0),
+                'sensitivity_figure': opt_result.get('sensitivity_figure', None)  # For ML wake extraction visualization
             }
             
             # Simple pair - no need to assign additional turbines
@@ -3943,8 +4094,721 @@ def optimize_multiple_turbine_pairs(turbine_pairs_data, power_agent, wake_agent,
 
 
 # =============================================================================
-# Wake Deflection Physics
+# ML-Based Wake Analysis Functions (User's Expert Approach)
 # =============================================================================
+
+def extract_vertical_profile_from_wake(wake_predictions, grid, downstream_distance_m, 
+                                        vertical_range_m=300, hub_height_m=90):
+    """
+    Extract vertical velocity profile from ML wake predictions at specified downstream distance.
+    
+    Based on user's expert approach: Extract velocity profile along vertical line at given
+    downstream distance to analyze wake deficit and lateral migration.
+    
+    The ML wake model provides full 3D velocity fields. This function samples a vertical
+    line at a specific downstream distance (e.g., 0m at turbine, 1700m far downstream)
+    to extract the velocity profile for wake analysis.
+    
+    Parameters:
+    -----------
+    wake_predictions : np.ndarray
+        Shape (n_timesteps, n_space, 3) - velocity field from TT-OpInf model
+    grid : pyvista.UnstructuredGrid
+        Spatial grid with point coordinates
+    downstream_distance_m : float
+        Distance downstream from turbine to extract profile (e.g., 0m, 1700m)
+    vertical_range_m : float
+        Vertical extent above/below hub (default: 300m = ±300m total 600m)
+    hub_height_m : float
+        Hub height of turbine (default: 90m for NREL 5MW)
+    
+    Returns:
+    --------
+    dict with keys:
+        'z_coords': Vertical coordinates (m)
+        'velocities': Time-averaged velocity magnitudes at each z
+        'lateral_positions': Corresponding y-coordinates (lateral positions)
+        'x_coord': Actual downstream x-coordinate sampled
+        'n_points': Number of grid points in profile
+    """
+    import numpy as np
+    import sys
+    
+    # Get grid coordinates
+    points = grid.points  # Shape: (n_points, 3) with columns [x, y, z]
+    
+    print(f"[DEBUG extract_profile] Searching for points at x={downstream_distance_m:.1f}m, grid has {len(points)} total points", file=sys.stderr)
+    print(f"[DEBUG extract_profile] Grid x-range: [{points[:, 0].min():.1f}, {points[:, 0].max():.1f}]", file=sys.stderr)
+    
+    # Find points near the specified downstream distance
+    # Allow ±10m tolerance for finding points
+    x_tolerance = 10.0
+    mask_x = np.abs(points[:, 0] - downstream_distance_m) < x_tolerance
+    
+    if not np.any(mask_x):
+        # No points found at this distance
+        print(f"[DEBUG extract_profile] ❌ No grid points found at x={downstream_distance_m:.1f}m ±{x_tolerance}m", file=sys.stderr)
+        return None
+    
+    # Filter to vertical range around hub height
+    z_min = hub_height_m - vertical_range_m
+    z_max = hub_height_m + vertical_range_m
+    mask_z = (points[:, 2] >= z_min) & (points[:, 2] <= z_max)
+    
+    # Combined mask
+    mask = mask_x & mask_z
+    
+    print(f"[DEBUG extract_profile] Found {np.sum(mask_x)} points at x±{x_tolerance}m, {np.sum(mask)} after z-filtering [{z_min:.1f}, {z_max:.1f}]", file=sys.stderr)
+    
+    if np.sum(mask) < 5:
+        # Too few points
+        print(f"[DEBUG extract_profile] ❌ Only {np.sum(mask)} points found (need ≥5)", file=sys.stderr)
+        return None
+    
+    # Extract points and velocities at this location
+    selected_points = points[mask]
+    selected_indices = np.where(mask)[0]
+    
+    # Time-average velocities
+    vel_at_location = wake_predictions[:, selected_indices, :]  # (n_time, n_selected, 3)
+    vel_mag = np.linalg.norm(vel_at_location, axis=2)  # (n_time, n_selected)
+    vel_avg = np.mean(vel_mag, axis=0)  # (n_selected,) - time-averaged
+    
+    print(f"[DEBUG extract_profile] ✅ Successfully extracted {len(vel_avg)} points at x={np.mean(selected_points[:, 0]):.1f}m", file=sys.stderr)
+    
+    return {
+        'z_coords': selected_points[:, 2],  # Vertical positions
+        'velocities': vel_avg,  # Time-averaged velocity magnitudes
+        'lateral_positions': selected_points[:, 1],  # Lateral (y) positions
+        'x_coord': np.mean(selected_points[:, 0]),  # Actual x sampled
+        'n_points': len(vel_avg)
+    }
+
+
+def calculate_wake_centerline_and_deficit(profile_start, profile_end, freestream_velocity=8.5):
+    """
+    Calculate wake deficit and lateral migration from two vertical profiles.
+    
+    User's expert approach: Track the "eye" of the wake (minimum velocity location) at both
+    start and end profiles. The lateral displacement of the wake eye reveals how the wake
+    centerline has migrated due to yaw misalignment.
+    
+    CRITICAL: Wake eye = location of MINIMUM velocity in vertical profile.
+    Lateral migration = change in y-position of the wake eye between start and end.
+    
+    Parameters:
+    -----------
+    profile_start : dict
+        Vertical profile at turbine location (x=0m or near-wake)
+    profile_end : dict
+        Vertical profile at reference downstream location (e.g., x=1000m)
+    freestream_velocity : float
+        Freestream wind speed (m/s)
+    
+    Returns:
+    --------
+    dict with keys:
+        'deficit_start': Maximum wake deficit at start location (0 to 1)
+        'deficit_end': Maximum wake deficit at end location (0 to 1)
+        'lateral_migration': Lateral displacement of wake eye (m) = y_eye_end - y_eye_start
+        'y_eye_start': Y-position of wake eye at start (m)
+        'y_eye_end': Y-position of wake eye at end (m)
+        'z_eye_start': Z-position of wake eye at start (m)
+        'z_eye_end': Z-position of wake eye at end (m)
+        'migration_rate': Linear migration rate (m/m) = lateral_migration / x_end
+    """
+    import numpy as np
+    import sys
+    
+    if profile_start is None or profile_end is None:
+        return None
+    
+    # Find wake EYE (minimum velocity) at START location
+    idx_eye_start = np.argmin(profile_start['velocities'])
+    y_eye_start = profile_start['lateral_positions'][idx_eye_start]
+    z_eye_start = profile_start['z_coords'][idx_eye_start]
+    vel_min_start = profile_start['velocities'][idx_eye_start]
+    deficit_start = 1.0 - (vel_min_start / freestream_velocity)
+    deficit_start = np.clip(deficit_start, 0, 1)
+    
+    # Find wake EYE (minimum velocity) at END location
+    idx_eye_end = np.argmin(profile_end['velocities'])
+    y_eye_end = profile_end['lateral_positions'][idx_eye_end]
+    z_eye_end = profile_end['z_coords'][idx_eye_end]
+    vel_min_end = profile_end['velocities'][idx_eye_end]
+    deficit_end = 1.0 - (vel_min_end / freestream_velocity)
+    deficit_end = np.clip(deficit_end, 0, 1)
+    
+    # Lateral migration = change in wake eye position
+    lateral_migration = y_eye_end - y_eye_start
+    
+    # Migration rate for linear extrapolation
+    x_end = profile_end['x_coord']
+    migration_rate = lateral_migration / x_end if x_end > 0 else 0.0
+    
+    print(f"[DEBUG calc_wake_centerline] Wake eye at start: y={y_eye_start:.2f}m, z={z_eye_start:.1f}m, deficit={deficit_start:.3f}", file=sys.stderr)
+    print(f"[DEBUG calc_wake_centerline] Wake eye at end: y={y_eye_end:.2f}m, z={z_eye_end:.1f}m, deficit={deficit_end:.3f}", file=sys.stderr)
+    print(f"[DEBUG calc_wake_centerline] Lateral migration: {lateral_migration:.2f}m, rate: {migration_rate:.5f} m/m", file=sys.stderr)
+    
+    return {
+        'deficit_start': deficit_start,
+        'deficit_end': deficit_end,
+        'lateral_migration': lateral_migration,
+        'y_eye_start': y_eye_start,
+        'y_eye_end': y_eye_end,
+        'z_eye_start': z_eye_start,
+        'z_eye_end': z_eye_end,
+        'migration_rate': migration_rate,
+        'x_end': x_end
+    }
+
+
+def extrapolate_wake_trajectory(wake_analysis, target_distance_m, reference_distance_m):
+    """
+    Extrapolate wake lateral position and deficit to arbitrary downstream distance.
+    
+    User's approach: Linear extrapolation using measured migration rate from wake eye tracking.
+    Given wake eye positions at start (x=0) and reference distance (x=x_ref), extrapolate
+    to actual turbine distance (x=x_target) using linear rate.
+    
+    Formula:
+        migration_rate = (y_eye_end - y_eye_start) / x_ref  [m/m]
+        y_at_target = y_eye_start + migration_rate × x_target
+    
+    Parameters:
+    -----------
+    wake_analysis : dict
+        Result from calculate_wake_centerline_and_deficit() with keys:
+        'y_eye_start', 'y_eye_end', 'lateral_migration', 'migration_rate'
+    target_distance_m : float
+        Distance where we want to predict wake (e.g., actual turbine spacing 2500m)
+    reference_distance_m : float
+        Distance where wake was measured (e.g., 1000m from grid)
+    
+    Returns:
+    --------
+    dict with keys:
+        'lateral_migration_at_target': Absolute Y-position of wake eye at target (m)
+        'deficit_at_target': Estimated wake deficit at target distance
+        'extrapolation_ratio': target_distance / reference_distance
+        'migration_rate': m/m
+        'y_eye_start': Starting Y-position (m)
+        'is_extrapolation': bool - True if target > reference
+    """
+    import numpy as np
+    import sys
+    
+    if wake_analysis is None:
+        return None
+    
+    # Get wake eye positions from analysis
+    y_start = wake_analysis['y_eye_start']
+    migration_rate = wake_analysis['migration_rate']
+    
+    # Linear extrapolation: y(x) = y_start + rate × x
+    y_at_target = y_start + migration_rate * target_distance_m
+    
+    # Deficit also extrapolates (conservative linear estimate)
+    extrapolation_ratio = target_distance_m / reference_distance_m
+    deficit_target = wake_analysis['deficit_end'] * extrapolation_ratio
+    deficit_target = np.clip(deficit_target, 0, 1)  # Physical limits
+    
+    print(f"[DEBUG extrapolate] Target distance: {target_distance_m:.1f}m, Reference: {reference_distance_m:.1f}m", file=sys.stderr)
+    print(f"[DEBUG extrapolate] y_start={y_start:.2f}m, rate={migration_rate:.5f}m/m → y_target={y_at_target:.2f}m", file=sys.stderr)
+    
+    return {
+        'lateral_migration_at_target': y_at_target,  # Absolute Y-position
+        'deficit_at_target': deficit_target,
+        'extrapolation_ratio': extrapolation_ratio,
+        'migration_rate': migration_rate,
+        'y_eye_start': y_start,
+        'is_extrapolation': target_distance_m > reference_distance_m
+    }
+
+
+def check_wake_turbine_overlap(wake_at_distance, downstream_turbine_position, 
+                                rotor_radius_m=63.0):
+    """
+    Check if wake overlaps with downstream turbine rotor.
+    
+    User's approach: Given known positions of both turbines and predicted wake
+    trajectory, determine if wake will hit downstream turbine. This is a geometric
+    calculation comparing wake centerline position to turbine position.
+    
+    Parameters:
+    -----------
+    wake_at_distance : dict
+        Result from extrapolate_wake_trajectory() - wake position at downstream turbine
+    downstream_turbine_position : dict
+        {'x': downstream x-coord, 'y': downstream y-coord (lateral)}
+    rotor_radius_m : float
+        Rotor radius (default: 63m for NREL 5MW with D=126m)
+    
+    Returns:
+    --------
+    dict with keys:
+        'overlaps': bool - True if wake hits turbine
+        'lateral_clearance': float - Distance between wake center and turbine center (m)
+        'overlap_fraction': float - Fraction of rotor disk in wake (0 to 1)
+        'wake_center_y': Wake centerline y-position
+        'turbine_center_y': Turbine centerline y-position
+    """
+    import numpy as np
+    
+    if wake_at_distance is None:
+        # No wake data, assume overlap for safety
+        return {'overlaps': True, 'lateral_clearance': 0, 'overlap_fraction': 1.0}
+    
+    # Lateral distance between wake centerline and turbine center
+    wake_y = wake_at_distance['lateral_migration_at_target']
+    turbine_y = downstream_turbine_position.get('y', 0)  # Assume 0 if not specified
+    
+    lateral_clearance = abs(wake_y - turbine_y)
+    
+    # Check if wake overlaps turbine rotor disk
+    # Assume wake width ~ 1.5 * rotor_diameter (conservative estimate based on expansion)
+    wake_half_width = 1.5 * rotor_radius_m  # 94.5m for NREL 5MW
+    
+    if lateral_clearance > (rotor_radius_m + wake_half_width):
+        # Wake completely misses turbine
+        overlaps = False
+        overlap_fraction = 0.0
+    elif lateral_clearance < (wake_half_width - rotor_radius_m):
+        # Turbine completely in wake
+        overlaps = True
+        overlap_fraction = 1.0
+    else:
+        # Partial overlap - estimate fraction
+        overlaps = True
+        overlap_fraction = 1.0 - (lateral_clearance / (rotor_radius_m + wake_half_width))
+        overlap_fraction = np.clip(overlap_fraction, 0, 1)
+    
+    return {
+        'overlaps': overlaps,
+        'lateral_clearance': lateral_clearance,
+        'overlap_fraction': overlap_fraction,
+        'wake_center_y': wake_y,
+        'turbine_center_y': turbine_y
+    }
+
+
+def find_optimal_yaw_for_wake_avoidance(wake_agent, power_agent, P_base, turbine_spacing_D, rotor_diameter=126.0,
+                                         downstream_turbine_position=None, 
+                                         yaw_constraint=(0, 15), n_timesteps=50,
+                                         reference_distance_m=None, verbose=False):
+    """
+    Find minimum yaw misalignment needed to steer wake away from downstream turbine.
+    
+    User's expert approach: Use ML wake model to find the yaw angle that causes
+    sufficient lateral wake migration to miss the downstream turbine entirely or
+    minimize overlap. Tests multiple yaw angles and returns the optimal one.
+    
+    Strategy:
+    1. Test yaw angles from 0° to 15° (constraint)
+    2. For each yaw, run ML wake model
+    3. Extract wake profiles at 0m and 1700m
+    4. Calculate lateral migration
+    5. Extrapolate to actual turbine distance
+    6. Check if wake misses downstream turbine
+    7. Calculate power for upstream (ML model) and downstream (with wake deficit)
+    8. Return minimum yaw where overlap < 10%
+    
+    Parameters:
+    -----------
+    wake_agent : WakeFlowAgent
+        ML wake flow prediction agent (TT-OpInf model)
+    power_agent : RotorPowerAgent
+        ML power prediction agent (GP model)
+    P_base : float
+        Baseline power at 0° yaw (MW) from ML model
+    turbine_spacing_D : float
+        Actual turbine spacing in rotor diameters
+    rotor_diameter : float
+        Rotor diameter in meters (default: 126m for NREL 5MW)
+    downstream_turbine_position : dict
+        Position {'x': x_m, 'y': y_m (lateral offset)}
+    yaw_constraint : tuple
+        (min_yaw, max_yaw) in degrees (default: 0-15°)
+    n_timesteps : int
+        Timesteps for ML prediction
+    reference_distance_m : float or None
+        Distance to extract wake profile for analysis. If None, auto-detect from grid extent.
+        Default: None (auto-detect to 80% of grid x_max or 1700m, whichever is smaller)
+    verbose : bool
+        Print progress information
+    
+    Returns:
+    --------
+    dict with keys:
+        'optimal_yaw': float - Minimum yaw angle for wake avoidance (degrees)
+        'wake_trajectory': list - Wake analysis at different yaw angles tested
+        'avoidance_achieved': bool - True if wake can be steered away within constraint
+        'turbine_spacing_m': Actual spacing in meters
+        'turbine_spacing_D': Spacing in rotor diameters
+        'reference_distance_m': Actual reference distance used (m)
+    """
+    import numpy as np
+    import sys
+    
+    if downstream_turbine_position is None:
+        downstream_turbine_position = {'x': turbine_spacing_D * rotor_diameter, 'y': 0}
+    
+    target_distance_m = turbine_spacing_D * rotor_diameter
+    rotor_radius_m = rotor_diameter / 2.0
+    
+    # Auto-detect reference distance from grid extent if not specified
+    if reference_distance_m is None:
+        grid = wake_agent.grid
+        if grid is not None:
+            x_max = grid.points[:, 0].max()
+            # Use 80% of grid extent for safety, capped at 1700m
+            reference_distance_m = min(x_max * 0.8, 1700.0)
+            print(f"[DEBUG find_optimal_yaw] Auto-detected reference distance: {reference_distance_m:.1f}m (grid extends to {x_max:.1f}m)", file=sys.stderr)
+        else:
+            reference_distance_m = 1000.0  # Conservative fallback
+            print(f"[DEBUG find_optimal_yaw] Grid is None, using fallback reference distance: {reference_distance_m:.1f}m", file=sys.stderr)
+    
+    # Test yaw angles from minimum to maximum
+    yaw_test_angles = np.linspace(yaw_constraint[0], yaw_constraint[1], 8)
+    
+    wake_trajectory = []
+    
+    # DEBUG: Initial grid check
+    import sys
+    print(f"\n[DEBUG find_optimal_yaw] Starting yaw tests at spacing={turbine_spacing_D:.2f}D ({target_distance_m:.1f}m)", file=sys.stderr)
+    print(f"[DEBUG find_optimal_yaw] wake_agent.grid exists? {hasattr(wake_agent, 'grid')}", file=sys.stderr)
+    if hasattr(wake_agent, 'grid'):
+        print(f"[DEBUG find_optimal_yaw] wake_agent.grid is None? {wake_agent.grid is None}", file=sys.stderr)
+    print(f"[DEBUG find_optimal_yaw] Testing {len(yaw_test_angles)} yaw angles: {yaw_test_angles}", file=sys.stderr)
+    
+    for yaw_deg in yaw_test_angles:
+        if verbose:
+            print(f"  Testing yaw = {yaw_deg:.1f}°...")
+        
+        try:
+            # Get wake predictions from ML model
+            nacelle_dir = 270.0 + yaw_deg  # Convert misalignment to nacelle direction
+            wake_pred, _ = wake_agent.predict(
+                yaw_angle=nacelle_dir, 
+                n_timesteps=n_timesteps,
+                export_vtk=False, 
+                verbose=False
+            )
+            
+            grid = wake_agent.grid
+            print(f"[DEBUG find_optimal_yaw] Yaw={yaw_deg:.1f}°: grid is None? {grid is None}", file=sys.stderr)
+            if grid is None:
+                print(f"[DEBUG find_optimal_yaw] ❌ Grid is None at yaw={yaw_deg:.1f}°! Breaking loop.", file=sys.stderr)
+                if verbose:
+                    print("    Warning: No grid available, skipping ML-based analysis")
+                break
+            
+            # Extract vertical profiles at start and reference distance
+            profile_start = extract_vertical_profile_from_wake(
+                wake_pred, grid, downstream_distance_m=0, 
+                vertical_range_m=300, hub_height_m=90
+            )
+            
+            profile_end = extract_vertical_profile_from_wake(
+                wake_pred, grid, downstream_distance_m=reference_distance_m,
+                vertical_range_m=300, hub_height_m=90
+            )
+            
+            print(f"[DEBUG find_optimal_yaw] Yaw={yaw_deg:.1f}°: profile_start is None? {profile_start is None}, profile_end is None? {profile_end is None}", file=sys.stderr)
+            if profile_start is None or profile_end is None:
+                print(f"[DEBUG find_optimal_yaw] ❌ Profile extraction failed at yaw={yaw_deg:.1f}°. Skipping.", file=sys.stderr)
+                if verbose:
+                    print(f"    Skipping yaw={yaw_deg:.1f}° (insufficient grid points)")
+                continue
+            
+            # Calculate wake centerline and deficit
+            wake_analysis = calculate_wake_centerline_and_deficit(
+                profile_start, profile_end, freestream_velocity=8.5
+            )
+            
+            # Extrapolate to target distance (actual turbine spacing)
+            wake_at_target = extrapolate_wake_trajectory(
+                wake_analysis, target_distance_m, reference_distance_m
+            )
+            
+            # Check overlap with downstream turbine
+            overlap_check = check_wake_turbine_overlap(
+                wake_at_target, downstream_turbine_position, rotor_radius_m
+            )
+            
+            # Calculate power at this yaw angle
+            # Upstream power: Use ML model at actual yaw
+            upstream_result = power_agent.predict(yaw_angle=nacelle_dir, n_time_points=n_timesteps)
+            upstream_power = extract_settled_power(upstream_result['power_mean_MW'])
+            
+            # Downstream power: Based on wake overlap
+            if overlap_check['overlaps']:
+                # Wake hits turbine - calculate power loss
+                overlap_frac = overlap_check['overlap_fraction']
+                deficit_at_turbine = wake_at_target['deficit_at_target'] * overlap_frac
+                downstream_power = P_base * (1 - deficit_at_turbine)**3
+            else:
+                # Wake completely misses turbine - full power!
+                downstream_power = P_base
+            
+            total_power = upstream_power + downstream_power
+            
+            wake_trajectory.append({
+                'yaw_deg': yaw_deg,
+                'wake_analysis': wake_analysis,
+                'wake_at_target': wake_at_target,
+                'overlap_check': overlap_check,
+                'upstream_power_MW': upstream_power,
+                'downstream_power_MW': downstream_power,
+                'total_power_MW': total_power
+            })
+            
+            print(f"[DEBUG find_optimal_yaw] ✅ Yaw={yaw_deg:.1f}° SUCCESS: migration={wake_at_target['lateral_migration_at_target']:.1f}m, overlap={overlap_check['overlap_fraction']:.1%}, total_power={total_power:.3f}MW", file=sys.stderr)
+            
+            if verbose:
+                print(f"    Lateral migration: {wake_at_target['lateral_migration_at_target']:.1f}m, "
+                      f"Overlap: {overlap_check['overlap_fraction']:.1%}, "
+                      f"Total Power: {total_power:.3f} MW")
+            
+        except Exception as e:
+            print(f"[DEBUG find_optimal_yaw] ❌ Exception at yaw={yaw_deg:.1f}°: {type(e).__name__}: {e}", file=sys.stderr)
+            if verbose:
+                print(f"    Error at yaw={yaw_deg:.1f}°: {e}")
+            continue
+    
+    # Find minimum yaw where wake doesn't overlap (or has minimal overlap)
+    print(f"[DEBUG find_optimal_yaw] Loop complete. wake_trajectory has {len(wake_trajectory)} entries", file=sys.stderr)
+    
+    optimal_yaw = yaw_constraint[0]  # Default: no yaw
+    avoidance_achieved = False
+    
+    if not wake_trajectory:
+        # No successful tests - return baseline
+        print(f"[DEBUG find_optimal_yaw] ❌ wake_trajectory is EMPTY! All yaw tests failed.", file=sys.stderr)
+    
+    for result in wake_trajectory:
+        if result['overlap_check']['overlap_fraction'] < 0.1:  # < 10% overlap
+            optimal_yaw = result['yaw_deg']
+            avoidance_achieved = True
+            print(f"[DEBUG find_optimal_yaw] ✅ Wake avoidance achieved at {optimal_yaw:.1f}° (overlap < 10%)", file=sys.stderr)
+            break
+    
+    if not avoidance_achieved and wake_trajectory:
+        print(f"[DEBUG find_optimal_yaw] ⚠️ Wake avoidance not achieved. Using yaw with minimum overlap.", file=sys.stderr)
+    
+    return {
+        'optimal_yaw': optimal_yaw,
+        'wake_trajectory': wake_trajectory,
+        'avoidance_achieved': avoidance_achieved,
+        'turbine_spacing_m': target_distance_m,
+        'turbine_spacing_D': turbine_spacing_D,
+        'reference_distance_m': reference_distance_m
+    }
+
+
+# =============================================================================
+# Wake Physics Models (Bastankhah & Porté-Agel 2016)
+# =============================================================================
+def calculate_wake_deficit(turbine_spacing_D, upstream_yaw_deg=0.0, thrust_coefficient=0.8, wake_expansion_coeff=0.022, lateral_offset_D=0.0):
+    """
+    Calculate wake velocity deficit at downstream turbine using Bastankhah & Porté-Agel (2016) model
+    with full Gaussian lateral wake profile and yaw-induced wake deflection.
+
+    The wake deficit depends on:
+    1. Streamwise distance x/D (wake expands and centerline deficit recovers with distance)
+    2. Upstream yaw angle γ (reduces thrust via C_T'=C_T·cos²γ, and deflects wake laterally)
+    3. Lateral offset y/D (Gaussian decay: turbines off-centerline see less wake)
+    4. Thrust coefficient and atmospheric conditions (wake expansion rate k*)
+
+    Physics:
+    - Centerline deficit:  δ_max = 1 - √(1 - C_T'/(8σ²)),  where σ/D = k*·(x/D) + ε
+    - Wake deflection:     y_defl/D = θ₀·(x/D)/(1 + β·(x/D))  [Bastankhah 2016]
+    - Effective offset:    y_eff = y_lateral + y_defl  (steering moves wake away)
+    - Gaussian profile:    δ(x,y) = δ_max · exp(-y_eff²/(2σ²))
+
+    Parameters:
+    -----------
+    turbine_spacing_D : float
+        Streamwise (wind-aligned) distance between turbines in rotor diameters
+    upstream_yaw_deg : float or torch.Tensor
+        Upstream turbine yaw misalignment in degrees (0 = aligned with wind)
+    thrust_coefficient : float
+        Thrust coefficient (default: 0.8 for NREL 5MW)
+    wake_expansion_coeff : float
+        Wake expansion coefficient k* (default: 0.022 for neutral stability)
+    lateral_offset_D : float
+        Cross-wind lateral offset of downstream turbine in rotor diameters (default: 0.0 = on centerline).
+        This is the absolute distance from the wind-aligned line through the upstream turbine.
+
+    Returns:
+    --------
+    wake_deficit : float or torch.Tensor
+        Velocity deficit fraction at the downstream turbine (0 to 0.6)
+    """
+    import torch
+    import numpy as np
+
+    C_T = thrust_coefficient
+    k_star = wake_expansion_coeff
+    x_D = turbine_spacing_D  # Streamwise distance in rotor diameters
+
+    if isinstance(upstream_yaw_deg, torch.Tensor):
+        gamma = upstream_yaw_deg * np.pi / 180.0
+
+        # Yaw-corrected thrust coefficient: C_T' = C_T * cos²(γ)
+        C_T_prime = C_T * torch.cos(gamma) ** 2
+
+        # Wake width at downstream location: σ/D = k* * (x/D) + ε
+        epsilon = 0.2  # Initial wake half-width parameter
+        sigma_over_D = k_star * x_D + epsilon
+
+        # Centerline (maximum) wake deficit at this streamwise distance
+        # δ_max = 1 - √(1 - C_T' / (8(σ/D)²))
+        denominator = 8.0 * (sigma_over_D ** 2)
+        deficit_max = 1.0 - torch.sqrt(torch.clamp(1.0 - C_T_prime / denominator, min=0.01, max=1.0))
+
+        # Wake lateral deflection (Bastankhah & Porté-Agel 2016)
+        # θ₀ = 0.3γ/C_T · (1 - √(1-C_T))
+        # β = 0.5·C_T/(1 - C_T/2)
+        # y_defl/D = θ₀·(x/D) / (1 + β·(x/D))
+        sqrt_1_minus_CT = torch.sqrt(torch.tensor(1.0 - C_T))
+        theta_0 = (0.3 * gamma / C_T) * (1.0 - sqrt_1_minus_CT)
+        beta = 0.5 * C_T / (1.0 - C_T / 2.0)
+        y_deflection_D = theta_0 * x_D / (1.0 + beta * x_D)
+
+        # Effective lateral offset: wake steering moves wake away from downstream turbine
+        # y_eff = y_lateral + y_defl (deflection adds to offset, reducing wake impact)
+        y_eff_D = lateral_offset_D + y_deflection_D
+
+        # Gaussian lateral wake profile: δ(y) = δ_max · exp(-y²/(2σ²))
+        lateral_factor = torch.exp(-y_eff_D ** 2 / (2.0 * sigma_over_D ** 2))
+
+        wake_deficit = deficit_max * lateral_factor
+        wake_deficit = torch.clamp(wake_deficit, 0.0, 0.6)
+
+    else:
+        # NumPy version (for grid_search, bayesian_transfer, etc.)
+        gamma = np.radians(upstream_yaw_deg)
+        C_T_prime = C_T * np.cos(gamma) ** 2
+
+        epsilon = 0.2
+        sigma_over_D = k_star * x_D + epsilon
+
+        denominator = 8.0 * (sigma_over_D ** 2)
+        deficit_max = 1.0 - np.sqrt(np.clip(1.0 - C_T_prime / denominator, 0.01, 1.0))
+
+        # Wake lateral deflection
+        theta_0 = (0.3 * gamma / C_T) * (1.0 - np.sqrt(1.0 - C_T))
+        beta = 0.5 * C_T / (1.0 - C_T / 2.0)
+        y_deflection_D = theta_0 * x_D / (1.0 + beta * x_D)
+
+        # Effective lateral offset
+        y_eff_D = lateral_offset_D + y_deflection_D
+
+        # Gaussian lateral decay
+        lateral_factor = np.exp(-y_eff_D ** 2 / (2.0 * sigma_over_D ** 2))
+
+        wake_deficit = deficit_max * lateral_factor
+        wake_deficit = np.clip(wake_deficit, 0.0, 0.6)
+
+    return wake_deficit
+
+
+def plot_ml_wake_extraction_results(wake_trajectory, baseline_total_power, turbine_spacing_D, 
+                                      optimal_yaw, save_path=None):
+    """
+    Visualize ML wake extraction optimization results.
+    
+    Generates 3 subplots:
+    1. Yaw angle vs Lateral wake migration
+    2. Yaw angle vs Power (upstream, downstream, total)
+    3. Yaw angle vs Power gain relative to baseline
+    
+    Parameters:
+    -----------
+    wake_trajectory : list
+        Results from find_optimal_yaw_for_wake_avoidance containing yaw tests
+    baseline_total_power : float
+        Baseline total power at 0° yaw (MW)
+    turbine_spacing_D : float
+        Turbine spacing in rotor diameters
+    optimal_yaw : float
+        Optimal yaw angle found (degrees)
+    save_path : str, optional
+        Path to save figure (if None, returns fig object)
+    
+    Returns:
+    --------
+    matplotlib.figure.Figure or None
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    if not wake_trajectory:
+        print("No wake trajectory data to plot")
+        return None
+    
+    # Extract data from wake_trajectory
+    yaw_angles = [result['yaw_deg'] for result in wake_trajectory]
+    lateral_migrations = [result['wake_at_target']['lateral_migration_at_target'] for result in wake_trajectory]
+    upstream_powers = [result['upstream_power_MW'] for result in wake_trajectory]
+    downstream_powers = [result['downstream_power_MW'] for result in wake_trajectory]
+    total_powers = [result['total_power_MW'] for result in wake_trajectory]
+    overlap_fractions = [result['overlap_check']['overlap_fraction'] for result in wake_trajectory]
+    
+    # Calculate power gains
+    power_gains = [tp - baseline_total_power for tp in total_powers]
+    power_gain_pcts = [(tp - baseline_total_power) / baseline_total_power * 100 for tp in total_powers]
+    
+    # Create figure with 3 subplots
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # Subplot 1: Lateral Migration
+    ax1 = axes[0]
+    ax1.plot(yaw_angles, lateral_migrations, 'bo-', linewidth=2, markersize=8, label='Lateral Migration')
+    ax1.axvline(optimal_yaw, color='r', linestyle='--', linewidth=2, alpha=0.7, label=f'Optimal Yaw: {optimal_yaw:.1f}°')
+    ax1.set_xlabel('Upstream Yaw Misalignment (°)', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Lateral Wake Migration (m)', fontsize=12, fontweight='bold')
+    ax1.set_title(f'Wake Deflection vs Yaw Angle\nTurbine Spacing: {turbine_spacing_D:.1f}D', fontsize=13, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize=10)
+    
+    # Subplot 2: Power Components
+    ax2 = axes[1]
+    ax2.plot(yaw_angles, upstream_powers, 'b^-', linewidth=2, markersize=8, label='Upstream Power')
+    ax2.plot(yaw_angles, downstream_powers, 'gs-', linewidth=2, markersize=8, label='Downstream Power')
+    ax2.plot(yaw_angles, total_powers, 'ro-', linewidth=3, markersize=10, label='Total Farm Power')
+    ax2.axhline(baseline_total_power, color='gray', linestyle=':', linewidth=2, alpha=0.7, label='Baseline (0° yaw)')
+    ax2.axvline(optimal_yaw, color='r', linestyle='--', linewidth=2, alpha=0.7, label=f'Optimal: {optimal_yaw:.1f}°')
+    ax2.set_xlabel('Upstream Yaw Misalignment (°)', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Power (MW)', fontsize=12, fontweight='bold')
+    ax2.set_title('Power Generation vs Yaw Angle', fontsize=13, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(fontsize=9, loc='best')
+    
+    # Subplot 3: Power Gain
+    ax3 = axes[2]
+    colors = ['green' if pg > 0 else 'red' for pg in power_gains]
+    ax3.bar(yaw_angles, power_gain_pcts, color=colors, alpha=0.6, edgecolor='black', linewidth=1.5)
+    ax3.axhline(0, color='black', linestyle='-', linewidth=1)
+    ax3.axvline(optimal_yaw, color='r', linestyle='--', linewidth=2, alpha=0.7, label=f'Optimal: {optimal_yaw:.1f}°')
+    ax3.set_xlabel('Upstream Yaw Misalignment (°)', fontsize=12, fontweight='bold')
+    ax3.set_ylabel('Power Gain (%)', fontsize=12, fontweight='bold')
+    ax3.set_title('Farm Power Gain vs Baseline', fontsize=13, fontweight='bold')
+    ax3.grid(True, alpha=0.3, axis='y')
+    ax3.legend(fontsize=10)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+        plt.close(fig)
+        return None
+    else:
+        return fig
+
+
 def calculate_wake_deflected_downstream_yaw(upstream_yaw_deg, turbine_spacing_D, thrust_coefficient=0.8):
     """
     Calculate downstream turbine yaw angle to align with deflected wake.
@@ -4019,12 +4883,31 @@ def calculate_wake_deflected_downstream_yaw(upstream_yaw_deg, turbine_spacing_D,
     return downstream_yaw_deg
 
 
+def extract_settled_power(power_trajectory, weight_decay=0.1):
+    """
+    Extract the initial power from a GP transient trajectory.
+
+    The GP model predicts transient power dynamics over normalized time (0->1).
+    Using the first time-step (t=0) captures the instantaneous yaw-dependent
+    power response before transient ramp effects dilute the yaw sensitivity.
+
+    Parameters:
+        power_trajectory: np.ndarray - GP posterior mean power over time
+        weight_decay: float - unused, kept for API compatibility
+
+    Returns:
+        float - power at first time-step (MW)
+    """
+    return float(power_trajectory[0])
+
+
 # =============================================================================
 # Two-Turbine Wake Steering Optimizer (Supports Both Methods)
 # =============================================================================
-def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float = 7.0, 
+def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float = 7.0,
                                n_timesteps: int = 50, verbose: bool = False,
-                               optimization_method: str = 'analytical_physics'):
+                               optimization_method: str = 'analytical_physics',
+                               lateral_offset_D: float = 0.0):
     """
     Optimize yaw misalignment angles for a two-turbine wind farm.
     
@@ -4042,11 +4925,14 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
     wake_agent : WakeFlowAgent
         Wake flow prediction agent (TT-OpInf model)
     turbine_spacing_D : float
-        Spacing between turbines in rotor diameters (default: 7D)
+        Streamwise (wind-aligned) distance between turbines in rotor diameters (default: 7D)
     n_timesteps : int
         Number of timesteps for predictions
     verbose : bool
         Print optimization progress
+    lateral_offset_D : float
+        Cross-wind lateral offset of downstream turbine in rotor diameters (default: 0.0).
+        Used for Gaussian lateral wake profile — turbines off-centerline see reduced wake.
     optimization_method : str
         'analytical_physics': Use analytical wake steering model with AD
         'ml_surrogate': Use differentiable surrogate fitted to ML models
@@ -4067,68 +4953,118 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
     
     if optimization_method == 'ml_surrogate':
         # =====================================================================
-        # Method 1: True AD through Differentiable ML Surrogates
+        # Method 1: Direct GP Model Evaluation Grid
+        # =====================================================================
+        # Uses actual GP model predictions at each candidate yaw angle,
+        # combined with per-pair Bastankhah wake deficit.
+        # - Upstream power: actual GP prediction at each yaw
+        # - Wake deficit: Bastankhah model with per-pair spacing & lateral offset
+        # - Downstream power: actual GP prediction × (1 - deficit)³
         # =====================================================================
         if verbose:
-            print("Building differentiable surrogates from ML models...")
-        
-        # Build surrogates by sampling the actual ML models
-        power_surrogate = DifferentiablePowerSurrogate(power_agent)
-        wake_surrogate = DifferentiableWakeSurrogate(wake_agent)
-        
-        def compute_farm_power_ml(upstream_misalignment):
-            """
-            Compute farm power using differentiable ML surrogates.
-            True AD through the ML models via polynomial approximation.
-            
-            Only upstream yaw is optimized. Downstream yaw is calculated
-            based on wake deflection physics to align with deflected wake.
-            """
-            # Calculate downstream yaw based on wake deflection
-            downstream_misalign = calculate_wake_deflected_downstream_yaw(
-                upstream_misalignment, turbine_spacing_D
+            print("Using ML Surrogate grid evaluation (direct GP predictions)...")
+
+        # Get baseline power from GP model at 0° yaw misalignment
+        baseline_result_ml = power_agent.predict(yaw_angle=270.0, n_time_points=n_timesteps)
+        P_base_ml = extract_settled_power(baseline_result_ml['power_mean_MW'])
+
+        # Baseline wake deficit at 0° yaw
+        baseline_deficit_ml = calculate_wake_deficit(
+            turbine_spacing_D=turbine_spacing_D,
+            upstream_yaw_deg=0.0,
+            thrust_coefficient=0.8,
+            wake_expansion_coeff=0.022,
+            lateral_offset_D=lateral_offset_D
+        )
+
+        best_power = -np.inf
+        best_up_power = P_base_ml
+        best_down_power = P_base_ml * 0.7
+        best_deficit = baseline_deficit_ml
+        optimal_upstream = 0.0
+        optimal_downstream = 0.0
+
+        # Dense 1° resolution grid
+        misalign_range = np.arange(0, 13, 1)
+
+        for up_misalign in misalign_range:
+            # Downstream yaw from wake deflection physics (spacing-dependent)
+            down_misalign = calculate_wake_deflected_downstream_yaw(
+                up_misalign, turbine_spacing_D
             )
-            
-            # Convert to nacelle directions
-            upstream_nacelle = 270.0 + upstream_misalignment
-            downstream_nacelle = 270.0 + downstream_misalign
-            
-            # ============================================================
-            # Upstream Power (from ML surrogate)
-            # ============================================================
-            # Power at actual yaw angle (includes yaw effect from ML model)
-            upstream_power_at_yaw = power_surrogate(upstream_nacelle)
-            upstream_power = upstream_power_at_yaw
-            
-            # ============================================================
-            # Wake Deficit (from ML surrogate)
-            # ============================================================
-            base_deficit = wake_surrogate(upstream_nacelle)
-            
-            # Wake steering effect: yaw deflects wake laterally
-            # At higher yaw, less of the wake impacts downstream turbine
-            k_steering = 0.6
-            upstream_rad = upstream_misalignment * np.pi / 180.0
-            steering_factor = k_steering * torch.sin(upstream_rad) * torch.cos(upstream_rad)**2
-            effective_deficit = base_deficit * (1.0 - steering_factor)
-            effective_deficit = torch.clamp(effective_deficit, 0.0, 0.5)
-            
-            # ============================================================
-            # Downstream Power (from ML surrogate + wake effect)
-            # ============================================================
-            downstream_power_base = power_surrogate(downstream_nacelle)
-            effective_wind_ratio = 1.0 - effective_deficit
-            downstream_power = downstream_power_base * (effective_wind_ratio ** 3)
-            
-            # ============================================================
-            # Total Farm Power
-            # ============================================================
-            total_power = upstream_power + downstream_power
-            
-            return total_power, upstream_power, downstream_power, effective_deficit, downstream_misalign
-        
-        compute_fn = compute_farm_power_ml
-        method_name = 'ML Surrogate AD'
+            if hasattr(down_misalign, 'item'):
+                down_misalign = down_misalign.item()
+
+            # Upstream power: actual GP model prediction
+            upstream_nacelle = 270.0 + up_misalign
+            upstream_result = power_agent.predict(yaw_angle=upstream_nacelle, n_time_points=n_timesteps)
+            up_power = extract_settled_power(upstream_result['power_mean_MW'])
+
+            # Wake deficit: Bastankhah model (per-pair spacing + lateral offset)
+            eff_deficit = calculate_wake_deficit(
+                turbine_spacing_D=turbine_spacing_D,
+                upstream_yaw_deg=float(up_misalign),
+                thrust_coefficient=0.8,
+                wake_expansion_coeff=0.022,
+                lateral_offset_D=lateral_offset_D
+            )
+            if hasattr(eff_deficit, 'item'):
+                eff_deficit = float(eff_deficit.item())
+            else:
+                eff_deficit = float(eff_deficit)
+
+            # Downstream power: GP prediction if within range, else cos³ fallback
+            downstream_nacelle = 270.0 + down_misalign
+            if 270.0 <= downstream_nacelle <= 285.0:
+                downstream_result = power_agent.predict(yaw_angle=downstream_nacelle, n_time_points=n_timesteps)
+                down_power_base = extract_settled_power(downstream_result['power_mean_MW'])
+            else:
+                down_rad = np.radians(down_misalign)
+                down_power_base = P_base_ml * np.cos(down_rad)**3
+
+            down_power = down_power_base * (1 - eff_deficit)**3
+            total = up_power + down_power
+
+            results_history.append({
+                'upstream_misalignment': float(up_misalign),
+                'downstream_misalignment': float(down_misalign),
+                'upstream_power': up_power,
+                'downstream_power': down_power,
+                'total_power': total,
+                'wake_deficit': eff_deficit
+            })
+
+            if total > best_power:
+                best_power = total
+                best_up_power = up_power
+                best_down_power = down_power
+                best_deficit = eff_deficit
+                optimal_upstream = float(up_misalign)
+                optimal_downstream = float(down_misalign)
+
+        # Compute baseline total for comparison
+        baseline_downstream_power = P_base_ml * (1 - baseline_deficit_ml)**3
+        baseline_total = P_base_ml + baseline_downstream_power
+
+        return {
+            'optimal_upstream_misalignment': optimal_upstream,
+            'optimal_downstream_misalignment': optimal_downstream,
+            'optimal_upstream_nacelle': yaw_misalignment_to_nacelle_direction(optimal_upstream),
+            'optimal_downstream_nacelle': yaw_misalignment_to_nacelle_direction(optimal_downstream),
+            'optimal_upstream_power': best_up_power if results_history else P_base_ml,
+            'optimal_downstream_power': best_down_power if results_history else P_base_ml * 0.7,
+            'optimal_total_power': best_power,
+            'optimal_wake_deficit': best_deficit if results_history else baseline_deficit_ml,
+            'baseline_total_power': baseline_total,
+            'baseline_upstream_power': P_base_ml,
+            'baseline_downstream_power': baseline_downstream_power,
+            'baseline_wake_deficit': baseline_deficit_ml,
+            'power_gain_MW': best_power - baseline_total,
+            'power_gain_percent': ((best_power - baseline_total) / baseline_total * 100) if baseline_total > 0 else 0.0,
+            'turbine_spacing_D': turbine_spacing_D,
+            'optimization_method': 'ML Surrogate (Direct GP Evaluation)',
+            'all_results': results_history
+        }
         
     elif optimization_method == 'analytical_physics':
         # =====================================================================
@@ -4139,7 +5075,7 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
         
         # Get baseline power (constant, from ML model)
         baseline_result = power_agent.predict(yaw_angle=270.0, n_time_points=n_timesteps)
-        P_base = np.mean(baseline_result['power_mean_MW'])
+        P_base = extract_settled_power(baseline_result['power_mean_MW'])
         
         # Get baseline wake deficit (constant, from ML model)
         wake_pred, _ = wake_agent.predict(yaw_angle=270.0, n_timesteps=n_timesteps,
@@ -4151,7 +5087,7 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
         def compute_farm_power_physics(upstream_misalignment):
             """
             Compute farm power using analytical physics with AD.
-            ML models provide baseline values; physics model is differentiated.
+            Uses distance-dependent wake model from Bastankhah & Porté-Agel (2016).
             
             Only upstream yaw is optimized. Downstream yaw is calculated
             based on wake deflection physics to align with deflected wake.
@@ -4169,24 +5105,28 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
             upstream_power = P_base * upstream_cos_loss
             
             # ============================================================
-            # Wake Steering (Bastankhah & Porté-Agel 2016)
+            # Wake Deficit (Distance-Dependent Bastankhah & Porté-Agel 2016)
+            # KEY FIX: Wake deficit now depends on turbine_spacing_D!
             # ============================================================
-            k_steering = 0.6
-            steering_reduction = k_steering * torch.sin(upstream_rad) * torch.cos(upstream_rad)**2
-            effective_deficit = base_deficit * (1.0 - steering_reduction)
-            effective_deficit = torch.clamp(torch.tensor(effective_deficit), 0.0, 0.5)
-            
+            wake_deficit = calculate_wake_deficit(
+                turbine_spacing_D=turbine_spacing_D,
+                upstream_yaw_deg=upstream_misalignment,
+                thrust_coefficient=0.8,
+                wake_expansion_coeff=0.022,
+                lateral_offset_D=lateral_offset_D
+            )
+
             # ============================================================
             # Downstream Power: P = P_base * (1-δ)³ * cos³(γ)
             # ============================================================
             downstream_rad = downstream_misalign * np.pi / 180.0
             downstream_cos_loss = torch.cos(downstream_rad) ** 3
-            effective_wind_ratio = 1.0 - effective_deficit
+            effective_wind_ratio = 1.0 - wake_deficit
             downstream_power = P_base * (effective_wind_ratio ** 3) * downstream_cos_loss
             
             total_power = upstream_power + downstream_power
             
-            return total_power, upstream_power, downstream_power, effective_deficit, downstream_misalign
+            return total_power, upstream_power, downstream_power, wake_deficit, downstream_misalign
         
         compute_fn = compute_farm_power_physics
         method_name = 'Analytical Physics AD'
@@ -4200,7 +5140,7 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
         
         # Get baseline values
         baseline_result = power_agent.predict(yaw_angle=270.0, n_time_points=n_timesteps)
-        P_base = np.mean(baseline_result['power_mean_MW'])
+        P_base = extract_settled_power(baseline_result['power_mean_MW'])
         
         wake_pred, _ = wake_agent.predict(yaw_angle=270.0, n_timesteps=n_timesteps,
                                           export_vtk=False, verbose=False)
@@ -4225,9 +5165,14 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
             
             up_power = P_base * np.cos(up_rad)**3
             
-            k_steering = 0.6
-            steering = k_steering * np.sin(up_rad) * np.cos(up_rad)**2
-            eff_deficit = base_deficit * (1.0 - steering)
+            # Distance-dependent wake deficit with lateral offset
+            eff_deficit = calculate_wake_deficit(
+                turbine_spacing_D=turbine_spacing_D,
+                upstream_yaw_deg=up_misalign,
+                thrust_coefficient=0.8,
+                wake_expansion_coeff=0.022,
+                lateral_offset_D=lateral_offset_D
+            )
             
             down_power = P_base * (1 - eff_deficit)**3 * np.cos(down_rad)**3
             total = up_power + down_power
@@ -4282,14 +5227,15 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
             base_gp_agent=power_agent,
             wake_agent=wake_agent,
             turbine_spacing_D=turbine_spacing_D,
-            n_initial_samples=5,
+            n_initial_samples=8,
             xi_lengthscale_range=(0.01, 0.05),
             n_timesteps=n_timesteps,
-            freestream_velocity=freestream_velocity
+            freestream_velocity=freestream_velocity,
+            lateral_offset_D=lateral_offset_D
         )
-        
-        # Run Bayesian Optimization
-        bo_results = bo_optimizer.optimize(n_iterations=15, verbose=verbose, xi_range=(0.01, 0.05))
+
+        # Run Bayesian Optimization (25 iterations for better spacing-dependent convergence)
+        bo_results = bo_optimizer.optimize(n_iterations=25, verbose=verbose, xi_range=(0.01, 0.05))
         
         # Extract optimal values
         optimal_upstream = bo_results['optimal_upstream_misalignment']
@@ -4302,37 +5248,37 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
         # Get detailed power breakdown at optimal point
         upstream_nacelle = yaw_misalignment_to_nacelle_direction(optimal_upstream)
         downstream_nacelle = yaw_misalignment_to_nacelle_direction(optimal_downstream)
-        
+
         # Upstream power
         upstream_result = power_agent.predict(yaw_angle=upstream_nacelle, n_time_points=n_timesteps)
-        optimal_upstream_power = np.mean(upstream_result['power_mean_MW'])
-        
-        # Wake deficit
-        wake_pred, _ = wake_agent.predict(yaw_angle=upstream_nacelle, n_timesteps=n_timesteps,
-                                          export_vtk=False, verbose=False)
-        vel_mag = np.linalg.norm(wake_pred, axis=2)
-        optimal_deficit = 1.0 - (np.mean(vel_mag) / freestream_velocity)
-        optimal_deficit = np.clip(optimal_deficit, 0, 0.5)
-        
+        optimal_upstream_power = extract_settled_power(upstream_result['power_mean_MW'])
+
+        # Distance-dependent wake deficit at optimal yaw with lateral offset
+        optimal_deficit = calculate_wake_deficit(
+            turbine_spacing_D=turbine_spacing_D,
+            upstream_yaw_deg=optimal_upstream,
+            thrust_coefficient=0.8,
+            wake_expansion_coeff=0.022,
+            lateral_offset_D=lateral_offset_D
+        )
+
         # Downstream power
-        k_steering = 0.6
-        upstream_rad = np.radians(optimal_upstream)
-        steering_factor = k_steering * np.sin(upstream_rad) * np.cos(upstream_rad)**2
-        effective_deficit = optimal_deficit * (1.0 - steering_factor)
-        
         downstream_result = power_agent.predict(yaw_angle=downstream_nacelle, n_time_points=n_timesteps)
-        downstream_power_base = np.mean(downstream_result['power_mean_MW'])
-        optimal_downstream_power = downstream_power_base * (1 - effective_deficit)**3
-        
+        downstream_power_base = extract_settled_power(downstream_result['power_mean_MW'])
+        optimal_downstream_power = downstream_power_base * (1 - optimal_deficit)**3
+
         # Baseline values
         baseline_result = power_agent.predict(yaw_angle=270.0, n_time_points=n_timesteps)
-        baseline_upstream_power = np.mean(baseline_result['power_mean_MW'])
-        
-        baseline_wake_pred, _ = wake_agent.predict(yaw_angle=270.0, n_timesteps=n_timesteps,
-                                                   export_vtk=False, verbose=False)
-        baseline_vel_mag = np.linalg.norm(baseline_wake_pred, axis=2)
-        baseline_deficit = 1.0 - (np.mean(baseline_vel_mag) / freestream_velocity)
-        baseline_deficit = np.clip(baseline_deficit, 0, 0.5)
+        baseline_upstream_power = extract_settled_power(baseline_result['power_mean_MW'])
+
+        # Baseline wake deficit at 0° yaw with lateral offset
+        baseline_deficit = calculate_wake_deficit(
+            turbine_spacing_D=turbine_spacing_D,
+            upstream_yaw_deg=0.0,
+            thrust_coefficient=0.8,
+            wake_expansion_coeff=0.022,
+            lateral_offset_D=lateral_offset_D
+        )
         baseline_downstream_power = baseline_upstream_power * (1 - baseline_deficit)**3
         
         if verbose:
@@ -4362,6 +5308,206 @@ def optimize_two_turbine_farm(power_agent, wake_agent, turbine_spacing_D: float 
             'optimization_method': 'Bayesian Optimization (Transfer Learning)',
             'n_evaluations': bo_results['n_evaluations'],
             'all_results': bo_results['results_history']
+        }
+    
+    elif optimization_method == 'ml_wake_extraction':
+        # =====================================================================
+        # Method 5: ML Wake Extraction (Expert Approach)
+        # =====================================================================
+        if verbose:
+            print("Using ML Wake Extraction method (Expert Approach)...")
+            print("Strategy: Extract vertical profiles → Track wake centerline → Extrapolate to target → Check overlap")
+        
+        # CRITICAL: Check if wake_agent has grid (required for ML wake extraction)
+        if not hasattr(wake_agent, 'grid') or wake_agent.grid is None:
+            if verbose:
+                print("❌ ERROR: ML Wake Extraction requires wake_agent.grid, but it's None!")
+                print("   Falling back to analytical_physics method...")
+            # Recursively call with analytical_physics method
+            return optimize_two_turbine_farm(
+                power_agent=power_agent,
+                wake_agent=wake_agent,
+                turbine_spacing_D=turbine_spacing_D,
+                lateral_offset_D=lateral_offset_D,
+                n_timesteps=n_timesteps,
+                verbose=verbose,
+                optimization_method='analytical_physics'
+            )
+        
+        # Get baseline power
+        baseline_result = power_agent.predict(yaw_angle=270.0, n_time_points=n_timesteps)
+        P_base = extract_settled_power(baseline_result['power_mean_MW'])
+
+        # Get baseline wake at 0° yaw
+        baseline_wake_pred, _ = wake_agent.predict(yaw_angle=270.0, n_timesteps=n_timesteps,
+                                                   export_vtk=False, verbose=False)
+        baseline_vel_mag = np.linalg.norm(baseline_wake_pred, axis=2)
+        baseline_deficit = 1.0 - (np.mean(baseline_vel_mag) / freestream_velocity)
+        baseline_deficit = np.clip(baseline_deficit, 0, 0.5)
+        
+        # Downstream turbine position at actual streamwise distance and lateral offset
+        turbine_spacing_m = turbine_spacing_D * rotor_diameter
+        lateral_offset_m = lateral_offset_D * rotor_diameter
+        downstream_turbine_position = {'x': turbine_spacing_m, 'y': lateral_offset_m}
+        
+        # Use the comprehensive helper function to find optimal yaw
+        optimization_result = find_optimal_yaw_for_wake_avoidance(
+            wake_agent=wake_agent,
+            power_agent=power_agent,
+            P_base=P_base,
+            turbine_spacing_D=turbine_spacing_D,
+            rotor_diameter=rotor_diameter,
+            downstream_turbine_position=downstream_turbine_position,
+            yaw_constraint=(0, 15),
+            n_timesteps=n_timesteps,
+            reference_distance_m=None,  # Auto-detect from grid extent
+            verbose=verbose
+        )
+        
+        # CRITICAL CHECK: If wake_trajectory is empty, all tests failed!
+        if not optimization_result['wake_trajectory']:
+            if verbose:
+                print("❌ ERROR: ML Wake Extraction failed - wake_trajectory is empty!")
+                print("   All yaw angle tests failed. Possible causes:")
+                print("   - Grid points insufficient at required distances")
+                print("   - Profile extraction failed")
+                print("   - ML model prediction errors")
+                print("   Returning baseline (no optimization possible)")
+            
+            # Return baseline results (no change)
+            baseline_upstream_power = P_base
+            baseline_downstream_power = P_base * (1 - baseline_deficit)**3
+            baseline_total_power = baseline_upstream_power + baseline_downstream_power
+            
+            return {
+                'optimal_upstream_misalignment': 0.0,
+                'optimal_downstream_misalignment': 0.0,
+                'optimal_upstream_nacelle': 270.0,
+                'optimal_downstream_nacelle': 270.0,
+                'optimal_upstream_power': baseline_upstream_power,
+                'optimal_downstream_power': baseline_downstream_power,
+                'optimal_total_power': baseline_total_power,
+                'optimal_wake_deficit': baseline_deficit,
+                'baseline_total_power': baseline_total_power,
+                'baseline_upstream_power': baseline_upstream_power,
+                'baseline_downstream_power': baseline_downstream_power,
+                'baseline_wake_deficit': baseline_deficit,
+                'power_gain_MW': 0.0,
+                'power_gain_percent': 0.0,
+                'turbine_spacing_D': turbine_spacing_D,
+                'optimization_method': 'ML Wake Extraction (Expert Approach) - FAILED',
+                'wake_avoidance_achieved': False,
+                'error': 'Wake trajectory empty - all tests failed',
+                'all_results': []
+            }
+        
+        if not optimization_result['avoidance_achieved']:
+            if verbose:
+                print("⚠️ Wake avoidance not achievable within yaw constraints")
+                print(f"   Best yaw: {optimization_result['optimal_yaw']:.2f}° (still has overlap)")
+        else:
+            if verbose:
+                print(f"✅ Wake avoidance achieved at {optimization_result['optimal_yaw']:.2f}°")
+        
+        # Get optimal yaw and corresponding wake analysis
+        optimal_upstream = optimization_result['optimal_yaw']
+        optimal_downstream = 0.0  # Downstream stays aligned (no deflection needed)
+        
+        # Get optimal wake trajectory for power calculation
+        optimal_wake_info = None
+        for traj in optimization_result['wake_trajectory']:
+            if abs(traj['yaw_deg'] - optimal_upstream) < 0.1:
+                optimal_wake_info = traj
+                break
+        
+        # Extract powers from optimal wake info (already calculated in find_optimal_yaw_for_wake_avoidance)
+        if optimal_wake_info:
+            optimal_upstream_power = optimal_wake_info['upstream_power_MW']
+            optimal_downstream_power = optimal_wake_info['downstream_power_MW']
+            
+            # Get deficit for reporting
+            if optimal_wake_info['overlap_check']['overlaps']:
+                overlap_frac = optimal_wake_info['overlap_check']['overlap_fraction']
+                optimal_deficit = optimal_wake_info['wake_at_target']['deficit_at_target'] * overlap_frac
+            else:
+                optimal_deficit = 0.0
+        else:
+            # CRITICAL BUG FIX: If optimal_yaw = 0°, use baseline powers (no change!)
+            if abs(optimal_upstream) < 0.01:  # Essentially 0°
+                if verbose:
+                    print("⚠️ WARNING: Optimal yaw is 0° (no change from baseline)")
+                    print("   Using baseline powers (no optimization benefit)")
+                optimal_upstream_power = P_base
+                optimal_downstream_power = P_base * (1 - baseline_deficit)**3
+                optimal_deficit = baseline_deficit
+            else:
+                # For non-zero yaw, estimate powers (this shouldn't happen if wake_trajectory exists)
+                if verbose:
+                    print(f"⚠️ WARNING: Optimal yaw is {optimal_upstream:.2f}° but no trajectory data found")
+                    print("   Using analytical approximation")
+                optimal_upstream_rad = np.radians(optimal_upstream)
+                optimal_upstream_power = P_base * np.cos(optimal_upstream_rad)**3
+                # Use same deficit as baseline (conservative estimate)
+                optimal_downstream_power = P_base * (1 - baseline_deficit)**3 * np.cos(optimal_upstream_rad)**0.5
+                optimal_deficit = baseline_deficit * (1 - 0.3 * np.sin(optimal_upstream_rad))
+        
+        optimal_total_power = optimal_upstream_power + optimal_downstream_power
+        
+        # Baseline powers
+        baseline_upstream_power = P_base
+        baseline_downstream_power = P_base * (1 - baseline_deficit)**3
+        baseline_total_power = baseline_upstream_power + baseline_downstream_power
+        
+        # Power gain
+        power_gain = optimal_total_power - baseline_total_power
+        power_gain_pct = (power_gain / baseline_total_power) * 100 if baseline_total_power > 0 else 0
+        
+        if verbose:
+            print(f"\n🎯 ML Wake Extraction Optimization Complete!")
+            print(f"  Optimal upstream yaw: {optimal_upstream:.2f}°")
+            print(f"  Optimal downstream yaw: {optimal_downstream:.2f}° (aligned)")
+            print(f"  Wake avoidance: {'YES ✅' if optimization_result['avoidance_achieved'] else 'NO ❌'}")
+            print(f"  Baseline power: {baseline_total_power:.4f} MW")
+            print(f"  Optimal power: {optimal_total_power:.4f} MW")
+            print(f"  Power gain: {power_gain:.4f} MW (+{power_gain_pct:.2f}%)")
+            print(f"  Tested {len(optimization_result['wake_trajectory'])} yaw angles")
+            if abs(power_gain) < 1e-6 and abs(optimal_upstream) < 0.01:
+                print(f"  ⚠️  NOTE: Zero gain is correct - no yaw change from baseline")
+        
+        # Generate visualization of yaw sensitivity analysis
+        try:
+            fig = plot_ml_wake_extraction_results(
+                wake_trajectory=optimization_result['wake_trajectory'],
+                baseline_total_power=baseline_total_power,
+                turbine_spacing_D=turbine_spacing_D,
+                optimal_yaw=optimal_upstream,
+                save_path=None  # Return fig object for display in GUI
+            )
+            optimization_result['sensitivity_figure'] = fig
+        except Exception as e:
+            if verbose:
+                print(f"  Warning: Could not generate sensitivity plots: {e}")
+            optimization_result['sensitivity_figure'] = None
+        
+        return {
+            'optimal_upstream_misalignment': optimal_upstream,
+            'optimal_downstream_misalignment': optimal_downstream,
+            'optimal_upstream_nacelle': yaw_misalignment_to_nacelle_direction(optimal_upstream),
+            'optimal_downstream_nacelle': yaw_misalignment_to_nacelle_direction(optimal_downstream),
+            'optimal_upstream_power': optimal_upstream_power,
+            'optimal_downstream_power': optimal_downstream_power,
+            'optimal_total_power': optimal_total_power,
+            'optimal_wake_deficit': optimal_deficit,
+            'baseline_total_power': baseline_total_power,
+            'baseline_upstream_power': baseline_upstream_power,
+            'baseline_downstream_power': baseline_downstream_power,
+            'baseline_wake_deficit': baseline_deficit,
+            'power_gain_MW': power_gain,
+            'power_gain_percent': power_gain_pct,
+            'turbine_spacing_D': turbine_spacing_D,
+            'optimization_method': 'ML Wake Extraction (Expert Approach)',
+            'wake_avoidance_achieved': optimization_result['avoidance_achieved'],
+            'all_results': optimization_result['wake_trajectory']
         }
     
     # =========================================================================
@@ -4895,19 +6041,19 @@ def main():
             with col1:
                 enable_agent_2b = st.checkbox(
                     "🤖 Agent 2B (LLM Expert)",
-                    value=True,
+                    value=False,
                     help="Enable LLM-based turbine control recommendations"
                 )
             with col2:
                 enable_agent_4 = st.checkbox(
                     "🌊 Agent 4 (Wake Flow ROM)",
-                    value=True,
+                    value=False,
                     help="Enable wake flow simulation using ROM"
                 )
 
             enable_agent_5 = st.checkbox(
                 "⚡ Agent 5 (Power Predictor)",
-                value=True,
+                value=False,
                 help="Enable power prediction using GP model"
             )
             
@@ -4923,7 +6069,7 @@ def main():
             agent_selection = st.radio(
                 "Choose turbine pair identification method:",
                 options=["Agent 2C (LLM-based)", "Agent 2D (Physical Wake Model)"],
-                index=0,
+                index=1,
                 help="Agent 2C uses AI/LLM for intelligent analysis. Agent 2D uses physical wake models as backup when LLM is unavailable."
             )
             
@@ -4955,10 +6101,11 @@ def main():
             st.markdown("**Optimization Method:**")
             opt_method = st.selectbox(
                 "Select method for wake steering optimization:",
-                options=['analytical_physics', 'ml_surrogate', 'grid_search', 'bayesian_transfer'],
+                options=['analytical_physics', 'ml_surrogate', 'grid_search', 'bayesian_transfer'], #'ml_wake_extraction' option.
                 format_func=lambda x: {
                     'ml_surrogate': '🧠 ML Surrogate AD (Most Accurate)',
                     'analytical_physics': '📐 Analytical Physics AD (Fastest)',
+                    'ml_wake_extraction': '🎯 ML Wake Extraction (Expert Approach)',
                     'grid_search': '🔍 Grid Search (Brute-force)',
                     'bayesian_transfer': '🎯 Bayesian Optimization (Transfer Learning)'
                 }[x],
@@ -4992,6 +6139,14 @@ def main():
                 - Fast analytical gradients
                 - Good balance of speed and accuracy
                 
+                **🎯 ML Wake Extraction (Expert Approach):**
+                - Extracts vertical velocity profiles from ML wake predictions at 1700m
+                - Calculates wake centerline and lateral migration
+                - Extrapolates to actual turbine spacing using linear interpolation
+                - Checks geometric wake-turbine overlap
+                - Finds minimum yaw angle for wake avoidance
+                - Data-driven: Uses location-specific wake characteristics from CFD model
+                
                 **🔍 Grid Search:**
                 - Brute-force evaluation of all combinations
                 - No gradients, guaranteed to find best in search space
@@ -5009,6 +6164,59 @@ def main():
             
             n_timesteps = st.slider("Prediction Timesteps", min_value=10, max_value=100, value=50, step=10)
             export_vtk = st.checkbox("Export VTK Files", value=False)
+            
+            st.markdown("---")
+            
+            # Expert Reviewer Settings
+            st.header("🎓 Expert Reviewer Agent")
+            st.markdown("**AI-powered validation at all critical checkpoints**")
+            
+            enable_reviewer = st.checkbox(
+                "🔍 Enable LLM Expert Reviewer",
+                value=False,
+                help="Expert LLM reviews outputs from all agents to catch errors and validate physical feasibility"
+            )
+            
+            if enable_reviewer:
+                reviewer_mode = st.radio(
+                    "Reviewer Mode:",
+                    options=["Advisory Only", "Blocking on Critical Issues"],
+                    index=0,
+                    help="**Advisory**: Provides feedback but never halts workflow. **Blocking**: Stops analysis on critical issues (e.g., optimization below cut-in wind speed)."
+                )
+                
+                st.session_state.reviewer_enabled = True
+                st.session_state.reviewer_mode = "advisory" if reviewer_mode == "Advisory Only" else "blocking"
+                
+                with st.expander("ℹ️ What does the Expert Reviewer do?"):
+                    st.markdown("""
+                    The Expert Reviewer is an LLM-based domain expert that validates analysis at 3 checkpoints:
+                    
+                    **Checkpoint 1 - After Agent 2 (Weather & Yaw):**
+                    - ✓ Wind speed within operational range (3-25 m/s)
+                    - ✓ Yaw angle recommendations valid
+                    - ✓ Turbine pair alignment with wind direction
+                    
+                    **Checkpoint 2 - After Agent 3 (Power & Optimization):**
+                    - ✓ Power predictions physically plausible (0-5 MW)
+                    - ✓ Optimization only runs when turbine is operating
+                    - ✓ Power gains realistic (<20%)
+                    
+                    **Checkpoint 3 - After Agent 4 (Wake Flow):**
+                    - ✓ Wake flow predictions consistent with conditions
+                    - ✓ Velocity fields physically reasonable
+                    
+                    **Final Review:**
+                    - Synthesizes all findings into actionable recommendations
+                    - Included in final report with severity levels
+                    - Examples caught: "Optimization ran with 2 m/s wind (below cut-in)"
+                    
+                    **Mode Selection:**
+                    - **Advisory**: Best for exploration and testing
+                    - **Blocking**: Best for production/safety-critical operations
+                    """)
+            else:
+                st.session_state.reviewer_enabled = False
             
             st.markdown("---")
             
@@ -5683,6 +6891,58 @@ def main():
                 st.info("👈 Enter the wind turbine location in the sidebar and click **Run Analysis** to begin.")
 
 
+def run_reviewer_checkpoint(reviewer_agent, checkpoint_name, review_func, *args, **kwargs):
+    """
+    Helper function to run reviewer checkpoints and handle async calls.
+    
+    Args:
+        reviewer_agent: WindTurbineReviewerAgent instance or None
+        checkpoint_name: Name of checkpoint for display
+        review_func: Async review function to call
+        *args, **kwargs: Arguments to pass to review_func
+    
+    Returns:
+        Review dict or None if reviewer not enabled
+    """
+    if reviewer_agent is None:
+        return None
+    
+    try:
+        with st.spinner(f"🎓 Expert Reviewer analyzing {checkpoint_name}..."):
+            # Run async function in event loop
+            review = asyncio.run(review_func(*args, **kwargs))
+            
+            # Check if workflow should continue
+            if not review.get("allow_continue", True):
+                severity = review.get("severity", "unknown")
+                summary = review.get("summary", "Critical issues detected")
+                
+                st.error(f"🔴 **Review Failed**: {summary}")
+                st.error(f"**Severity**: {severity}")
+                
+                # Show findings
+                findings = review.get("findings", [])
+                for finding in findings:
+                    if finding.get("type") == "critical":
+                        st.error(f"🔴 {finding.get('message', '')}")
+                
+                st.warning("⚠️ **Workflow halted by ExpertReviewer in blocking mode.** Fix issues and try again.")
+                return review
+            
+            # Display review summary (non-blocking)
+            severity = review.get("severity", "info")
+            if severity == "critical" and review.get("allow_continue"):
+                st.warning(f"⚠️ Expert Reviewer found critical issues in {checkpoint_name} (advisory mode - continuing)")
+            elif severity == "warning":
+                st.info(f"ℹ️ Expert Reviewer found warnings in {checkpoint_name}")
+            
+            return review
+            
+    except Exception as e:
+        st.warning(f"⚠️ Expert review failed for {checkpoint_name}: {e}")
+        return {"checkpoint": checkpoint_name, "status": "error", "error": str(e), "allow_continue": True}
+
+
 def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
     """Run the complete multi-agent analysis with GUI updates."""
     
@@ -5693,8 +6953,33 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
         "timestamp": datetime.now().isoformat(),
         "location": f"{selected_farm}, {farm_info['location']}",
         "wind_farm": selected_farm,
-        "farm_info": farm_info
+        "farm_info": farm_info,
+        "reviews": {}  # Store expert reviews
     }
+    
+    # Initialize reviewer agent if enabled
+    reviewer_agent = None
+    if st.session_state.get('reviewer_enabled', False) and REVIEWER_AGENT_AVAILABLE:
+        try:
+            # Load config
+            config_path = os.path.join(SCRIPT_DIR, "config.yaml")
+            if os.path.exists(config_path):
+                import yaml
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+            else:
+                config = {}
+            
+            reviewer_mode = st.session_state.get('reviewer_mode', 'advisory')
+            reviewer_agent = WindTurbineReviewerAgent(
+                config=config,
+                mode=reviewer_mode,
+                enabled=True
+            )
+            st.info(f"🎓 Expert Reviewer initialized in **{reviewer_mode}** mode")
+        except Exception as e:
+            st.warning(f"⚠️ Could not initialize Expert Reviewer: {e}. Continuing without reviewer.")
+            reviewer_agent = None
     
     # Progress tracking
     progress_bar = st.progress(0)
@@ -5800,6 +7085,26 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
         for reason in expert['reasoning']:
             st.write(f"• {reason}")
     
+    # CHECKPOINT 1 REVIEW: After Agent 2 completes
+    if reviewer_agent is not None:
+        try:
+            with st.spinner("🎓 Expert Reviewer validating Agent 2..."):
+                review1 = asyncio.run(reviewer_agent.review_agent2(
+                    weather_data=weather,
+                    expert_analysis=expert,
+                    agent2b_result=results.get('llm_expert'),
+                    turbine_pairs=None
+                ))
+                results["reviews"]["checkpoint1_agent2"] = review1
+                display_checkpoint_review_short(review1, "Agent 2")
+                
+                # Check if workflow should halt (blocking mode)
+                if not review1.get("allow_continue", True):
+                    st.error("⛔ **Workflow Halted**: Critical issues detected by Expert Reviewer.")
+                    st.stop()
+        except Exception as e:
+            st.warning(f"⚠️ Checkpoint 1 review failed: {e}")
+    
     # Arrow from Agent 2 to Agent 2B
     st.markdown('''
     <div style="text-align: center; font-size: 2.5rem; color: #1E88E5; margin: 15px 0;">
@@ -5887,6 +7192,21 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
     else:
         st.info("⏭️ Agent 2B (LLM Expert) is disabled. Enable it in Analysis Settings to run.")
         results['llm_expert'] = None
+    
+    # Update checkpoint 1 review with Agent 2B if available
+    if reviewer_agent is not None and results.get('llm_expert'):
+        try:
+            with st.spinner("🎓 Expert Reviewer re-validating with Agent 2B..."):
+                review1_updated = asyncio.run(reviewer_agent.review_agent2(
+                    weather_data=weather,
+                    expert_analysis=expert,
+                    agent2b_result=results.get('llm_expert'),
+                    turbine_pairs=results.get('turbine_pairs')
+                ))
+                results["reviews"]["checkpoint1_agent2"] = review1_updated
+                display_checkpoint_review_short(review1_updated, "Agent 2B")
+        except Exception as e:
+            st.warning(f"⚠️ Checkpoint 1B review failed: {e}")
     
     # =========================================================================
     # AGENT 2C: Turbine Pair Selection for Multi-Turbine Wake Optimization
@@ -6025,10 +7345,14 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
                                             'upstream_turbine': pair['upstream_turbine'],
                                             'downstream_turbine': pair['downstream_turbine'],
                                             'distance_km': pair['distance_m'] / 1000.0,
+                                            'distance_rotor_diameters': pair['distance_D'],
+                                            'downstream_distance_D': pair['downstream_distance_m'] / 126.0,
+                                            'lateral_offset_D': pair['lateral_distance_m'] / 126.0,
                                             'wake_strength': (
                                                 'high' if pair['wake_deficit'] > 0.15 else
                                                 'medium' if pair['wake_deficit'] > 0.08 else 'low'
                                             ),
+                                            'wake_deficit': pair['wake_deficit'],
                                             'priority': len(formatted_pairs) + 1
                                         })
                                     turbine_pair_analysis['turbine_pairs'] = formatted_pairs
@@ -6068,10 +7392,14 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
                                         'upstream_turbine': pair['upstream_turbine'],
                                         'downstream_turbine': pair['downstream_turbine'],
                                         'distance_km': pair['distance_m'] / 1000.0,
+                                        'distance_rotor_diameters': pair['distance_D'],
+                                        'downstream_distance_D': pair['downstream_distance_m'] / 126.0,
+                                        'lateral_offset_D': pair['lateral_distance_m'] / 126.0,
                                         'wake_strength': (
                                             'high' if pair['wake_deficit'] > 0.15 else
                                             'medium' if pair['wake_deficit'] > 0.08 else 'low'
                                         ),
+                                        'wake_deficit': pair['wake_deficit'],
                                         'priority': len(formatted_pairs) + 1
                                     })
                                 turbine_pair_analysis['turbine_pairs'] = formatted_pairs
@@ -6580,7 +7908,7 @@ Skipping Agent 3 optimization...
                     optimization_method=opt_method,
                     n_timesteps=min(n_timesteps, 30),
                     max_pairs=max_pairs,
-                    verbose=False
+                    verbose=True  # Enable debug output
                 )
                 
                 results["optimizer"] = opt_results
@@ -6685,10 +8013,17 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
                 downstream_id = result.get('downstream_id')
                 upstream_yaw = result.get('upstream_yaw', result['optimal_yaw_angles'].get(upstream_id, 0.0))
                 downstream_yaw = result.get('downstream_yaw', result['optimal_yaw_angles'].get(downstream_id, 0.0))
-                
+                spacing_D = result.get('turbine_spacing_D', 7.0)  # Euclidean distance for display
+                ds_dist_D = result.get('downstream_distance_D', spacing_D)  # Streamwise distance
+                lat_off_D = result.get('lateral_offset_D', 0.0)  # Cross-wind offset
+                overlap = result.get('overlap_class', 'full')  # Wake overlap classification
+
                 row = {
                     'Pair #': result['pair_index'],
                     'Upstream Turbine': f"T{upstream_id}",
+                    'Streamwise (D)': f"{ds_dist_D:.2f}",
+                    'Lateral (D)': f"{lat_off_D:.2f}",
+                    'Wake Overlap': overlap.capitalize(),
                     'Upstream Yaw (°)': f"{upstream_yaw:.1f}",
                     'Downstream Turbine': f"T{downstream_id}",
                     'Downstream Yaw (°)': f"{downstream_yaw:.1f}",
@@ -6708,6 +8043,9 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
                 column_config={
                     'Pair #': st.column_config.NumberColumn('Pair #', help='Priority rank from Agent 2C/2D'),
                     'Upstream Turbine': st.column_config.TextColumn('Upstream Turbine', help='Upwind turbine (applies wake steering)'),
+                    'Streamwise (D)': st.column_config.TextColumn('Streamwise (D)', help='Wind-aligned distance in rotor diameters (D=126m)'),
+                    'Lateral (D)': st.column_config.TextColumn('Lateral (D)', help='Cross-wind lateral offset in rotor diameters'),
+                    'Wake Overlap': st.column_config.TextColumn('Wake Overlap', help='Full=centerline, Partial=edge of wake, None=outside wake'),
                     'Upstream Yaw (°)': st.column_config.TextColumn('Upstream Yaw (°)', help='Yaw misalignment for wake steering'),
                     'Downstream Turbine': st.column_config.TextColumn('Downstream Turbine', help='Downwind turbine (in wake region)'),
                     'Downstream Yaw (°)': st.column_config.TextColumn('Downstream Yaw (°)', help='Physics-based yaw to align with deflected wake'),
@@ -6746,6 +8084,8 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
                 
                 **Important Notes:**
                 - Turbine IDs are taken directly from Agent 2C/2D recommendations
+                - **Each pair uses its actual physical spacing** (not hardcoded 7D)
+                - Different spacings lead to different optimal yaw angles
                 - Each pair is optimized individually (not simultaneously)
                 - Downstream yaw is computed from wake deflection physics (not optimized independently)
                 - Positive power gain confirms wake steering is beneficial
@@ -6770,8 +8110,10 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
                     upstream_id = result.get('upstream_id')
                     downstream_id = result.get('downstream_id')
                     upstream_yaw = result.get('upstream_yaw', result['optimal_yaw_angles'].get(upstream_id, 0.0))
+                    spacing_D = result.get('turbine_spacing_D', 7.0)
+                    spacing_m = spacing_D * 126.0  # Convert to meters (NREL 5MW rotor diameter)
                     
-                    st.markdown(f"**Pair {result['pair_index']}:** T{upstream_id} (Upstream) → T{downstream_id} (Downstream)")
+                    st.markdown(f"**Pair {result['pair_index']}:** T{upstream_id} (Upstream) → T{downstream_id} (Downstream) | **Spacing: {spacing_D:.2f}D ({spacing_m:.0f}m)**")
                     
                     detail_cols = st.columns(4)
                     
@@ -6824,6 +8166,23 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
                         st.caption(f"**Total Pair Power:** {result['baseline_power']:.4f} MW → {result['optimized_power']:.4f} MW")
                     
                     st.markdown("---")
+            
+            # Display ML Wake Extraction Sensitivity Figures (if available)
+            if opt_results['optimization_method'] == 'ML Wake Extraction (Expert Approach)':
+                st.markdown("#### 📈 Yaw Sensitivity Analysis (ML Wake Extraction)")
+                st.info("These figures show how lateral wake migration and power vary with upstream yaw angle for each optimized turbine pair.")
+                
+                for result in optimization_data:
+                    # Check if this pair has sensitivity figure
+                    if 'sensitivity_figure' in result and result['sensitivity_figure'] is not None:
+                        upstream_id = result.get('upstream_id')
+                        downstream_id = result.get('downstream_id')
+                        spacing_D = result.get('turbine_spacing_D', 7.0)
+                        
+                        st.markdown(f"**Pair {result['pair_index']}: T{upstream_id} → T{downstream_id} (Spacing: {spacing_D:.2f}D)**")
+                        st.pyplot(result['sensitivity_figure'])
+                        plt.close(result['sensitivity_figure'])
+                        st.markdown("---")
             
             # Store optimal nacelle directions for Agent 4 (wake simulation)
             # Use first pair for downstream agents
@@ -7160,7 +8519,39 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
         st.info("⏭️ Agent 5 (Power Predictor) is disabled. Enable it in Analysis Settings to run.")
         results["power"] = None
     
+    # CHECKPOINT 3 REVIEW: After Agent 4/5 (Power/Wake) completes
+    if reviewer_agent is not None and results.get("power"):
+        try:
+            with st.spinner("🎓 Expert Reviewer validating power predictions..."):
+                review3 = asyncio.run(reviewer_agent.review_agent4(
+                    weather_data=weather,
+                    expert_analysis=expert,
+                    wake_prediction=results.get("wake", {})
+                ))
+                results["reviews"]["checkpoint3_agent4"] = review3
+                display_checkpoint_review_short(review3, "Agent 4/5")
+        except Exception as e:
+            st.warning(f"⚠️ Checkpoint 3 review failed: {e}")
+    
     progress_bar.progress(95)
+    
+    # Generate final expert review
+    if reviewer_agent is not None:
+        try:
+            with st.spinner("🎓 Expert Reviewer generating final assessment..."):
+                final_review = asyncio.run(reviewer_agent.generate_final_review(results))
+                results["reviews"]["final_review"] = final_review
+                
+                # Display final review status
+                status = final_review.get("overall_status", "UNKNOWN")
+                if status == "FAILED":
+                    st.error(f"🔴 **Expert Review**: {final_review.get('status_message', 'Analysis contains critical issues')}")
+                elif status == "WARNING":
+                    st.warning(f"⚠️ **Expert Review**: {final_review.get('status_message', 'Analysis completed with warnings')}")
+                else:
+                    st.success(f"✅ **Expert Review**: {final_review.get('status_message', 'All validation checks passed')}")
+        except Exception as e:
+            st.warning(f"⚠️ Final expert review failed: {e}")
     
     progress_bar.progress(100)
     status_text.text("✅ Analysis complete!")
@@ -7309,22 +8700,8 @@ TURBINE:
                 llm_provider = st.session_state.get('llm_provider', 'NTNU')
                 selected_model = st.session_state.get('selected_model', 'moonshotai/Kimi-K2.5')
                 
-                # Build API configuration based on provider (same as Agent 2B/2C)
-                if llm_provider == "NTNU":
-                    api_base = "https://llm.hpc.ntnu.no/v1"
-                    api_key = "sk-48COknyy7BlFg8vbN1ywgg"
-                elif llm_provider == "OpenAI":
-                    api_base = "https://api.openai.com/v1"
-                    api_key = os.getenv("OPENAI_API_KEY", "your-openai-key")
-                elif llm_provider == "Ollama":
-                    api_base = "http://localhost:11434/v1"
-                    api_key = "ollama"
-                elif llm_provider == "Google":
-                    api_base = "https://generativelanguage.googleapis.com/v1beta"
-                    api_key = os.getenv("GOOGLE_API_KEY", "your-google-key")
-                else:  # Anthropic
-                    api_base = "https://api.anthropic.com/v1"
-                    api_key = os.getenv("ANTHROPIC_API_KEY", "your-anthropic-key")
+                # Get API configuration from environment / Streamlit secrets
+                api_base, api_key = get_api_config(llm_provider)
                 
                 # Construct detailed prompt
                 detailed_prompt = f"{context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer based on the wind farm analysis context above:"
@@ -7501,7 +8878,7 @@ Optimization Results Table:
                     upstream_yaw = result.get('upstream_yaw', result['optimal_yaw_angles'].get(upstream_id, 0.0))
                     downstream_yaw = result.get('downstream_yaw', result['optimal_yaw_angles'].get(downstream_id, 0.0))
                     
-                    optimizer_section += f"| {result['pair_index']:6d} | T{upstream_id:10s} | {upstream_yaw:11.1f}° | T{downstream_id:10s} | {downstream_yaw:13.1f}° | {result['power_gain_MW']:+.4f} MW ({result['power_gain_percent']:+.2f}%) |\n"
+                    optimizer_section += f"| {result['pair_index']:6d} | T{str(upstream_id):<10} | {upstream_yaw:11.1f}° | T{str(downstream_id):<10} | {downstream_yaw:13.1f}° | {result['power_gain_MW']:+.4f} MW ({result['power_gain_percent']:+.2f}%) |\n"
                 
                 optimizer_section += f"""
 ------------------------------------------------------------------------------------------
@@ -7607,6 +8984,146 @@ Note: This report includes results from Agents 1-3 (Weather, Expert, Optimizer).
         )
 
 
+def display_checkpoint_review_short(review, checkpoint_name):
+    """Display a short bullet-point checkpoint review immediately after agent completes."""
+    if review is None or not review.get("findings"):
+        return
+    
+    severity = review.get("severity", "info")
+    findings = review.get("findings", [])
+    
+    # Count critical and warning findings
+    critical_count = sum(1 for f in findings if f.get("type") == "critical")
+    warning_count = sum(1 for f in findings if f.get("type") == "warning")
+    
+    # Display header with color code
+    if severity == "critical":
+        st.error(f"🔴 **Expert Review - {checkpoint_name}**: {critical_count} critical issue(s)")
+    elif severity == "warning":
+        st.warning(f"⚠️ **Expert Review - {checkpoint_name}**: {warning_count} warning(s)")
+    else:
+        st.success(f"✅ **Expert Review - {checkpoint_name}**: All checks passed")
+    
+    # Show top 3 findings as bullets
+    display_findings = findings[:3]
+    for finding in display_findings:
+        finding_type = finding.get("type", "info")
+        message = finding.get("message", "")[:100]  # Truncate to 100 chars
+        
+        if finding_type == "critical":
+            st.markdown(f"- 🔴 {message}")
+        elif finding_type == "warning":
+            st.markdown(f"- ⚠️ {message}")
+        else:
+            st.markdown(f"- ✅ {message}")
+    
+    if len(findings) > 3:
+        st.caption(f"... and {len(findings) - 3} more finding(s). See comprehensive review for details.")
+
+
+def generate_review_export_report(reviews, results):
+    """Generate a comprehensive review report for export."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    location = results.get("location", "Unknown")
+    
+    report = f"""╔═══════════════════════════════════════════════════════════════════════════════╗
+║                    EXPERT REVIEW COMPREHENSIVE REPORT                         ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  Generated: {timestamp:<64} ║
+║  Location:  {location:<64} ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+"""
+    
+    # Final Review Summary
+    final_review = reviews.get("final_review", {})
+    if final_review:
+        status = final_review.get("overall_status", "UNKNOWN")
+        status_message = final_review.get("status_message", "")[:76]
+        
+        report += f"""┌───────────────────────────────────────────────────────────────────────────────┐
+│ OVERALL ASSESSMENT                                                            │
+├───────────────────────────────────────────────────────────────────────────────┤
+│  Status: {status:<70} │
+│  {status_message:<76} │
+│                                                                               │
+│  Critical Issues: {final_review.get('critical_count', 0):<58} │
+│  Warnings:        {final_review.get('warning_count', 0):<58} │
+│  Info Messages:   {final_review.get('info_count', 0):<58} │
+│  Checkpoints:     {final_review.get('checkpoint_count', 0):<58} │
+└───────────────────────────────────────────────────────────────────────────────┘
+
+"""
+    
+    # Detailed Checkpoint Reviews
+    checkpoint_names = [
+        ("checkpoint1_agent2", "Checkpoint 1: Agent 2 (Weather & Yaw)"),
+        ("checkpoint2_agent3", "Checkpoint 2: Agent 3 (Power & Optimization)"),
+        ("checkpoint3_agent4", "Checkpoint 3: Agent 4 (Wake Flow)")
+    ]
+    
+    for checkpoint_key, checkpoint_title in checkpoint_names:
+        review = reviews.get(checkpoint_key)
+        if review:
+            severity = review.get("severity", "info").upper()
+            findings = review.get("findings", [])
+            llm_assessment = review.get("llm_assessment", "")
+            
+            report += f"""┌───────────────────────────────────────────────────────────────────────────────┐
+│ {checkpoint_title:<77} │
+├───────────────────────────────────────────────────────────────────────────────┤
+│  Severity: {severity:<69} │
+│                                                                               │
+│  Findings:                                                                    │
+"""
+            
+            for finding in findings:
+                finding_type = finding.get("type", "info").upper()
+                message = finding.get("message", "")
+                rule = finding.get("rule", "unknown")
+                
+                # Wrap long messages
+                lines = [message[i:i+70] for i in range(0, len(message), 70)]
+                report += f"│  [{finding_type:8}] {lines[0]:<65} │\n"
+                for line in lines[1:]:
+                    report += f"│              {line:<65} │\n"
+                report += f"│              Rule: {rule:<57} │\n"
+            
+            if llm_assessment:
+                report += f"│                                                                               │\n"
+                report += f"│  LLM Expert Assessment:                                                       │\n"
+                # Wrap LLM assessment
+                assessment_lines = [llm_assessment[i:i+72] for i in range(0, len(llm_assessment), 72)]
+                for line in assessment_lines[:10]:  # Limit to 10 lines
+                    report += f"│  {line:<77} │\n"
+            
+            report += f"└───────────────────────────────────────────────────────────────────────────────┘\n\n"
+    
+    # Recommendations
+    if final_review and final_review.get("recommendations"):
+        report += f"""┌───────────────────────────────────────────────────────────────────────────────┐
+│ EXPERT RECOMMENDATIONS                                                        │
+├───────────────────────────────────────────────────────────────────────────────┤
+"""
+        for i, rec in enumerate(final_review["recommendations"], 1):
+            # Strip emojis
+            clean_rec = rec.replace("✅", "").replace("⚠️", "").replace("🔴", "").strip()
+            # Wrap long recommendations
+            lines = [clean_rec[i:i+72] for i in range(0, len(clean_rec), 72)]
+            report += f"│  {i}. {lines[0]:<75} │\n"
+            for line in lines[1:]:
+                report += f"│     {line:<75} │\n"
+        
+        report += f"└───────────────────────────────────────────────────────────────────────────────┘\n\n"
+    
+    report += f"""═══════════════════════════════════════════════════════════════════════════════
+                         END OF EXPERT REVIEW REPORT
+═══════════════════════════════════════════════════════════════════════════════
+"""
+    
+    return report
+
+
 def display_results(results):
     """Display previously computed results."""
     st.info("📊 Showing results from previous analysis. Click **Reset** to run a new analysis.")
@@ -7616,6 +9133,30 @@ def display_results(results):
     st.markdown("### 📊 Analysis Summary Report")
     st.markdown("*Summary of wind farm analysis based on optimizer results (Agents 1-3)*")
     display_summary_report(results)
+    
+    # Display Expert Review if available
+    if "reviews" in results and results["reviews"].get("final_review"):
+        st.markdown("---")
+        st.markdown("### 🎓 Expert Review Assessment")
+        st.markdown("*AI-powered validation of analysis outputs*")
+        display_expert_review(results["reviews"])
+        
+        # Handle review export if triggered
+        if st.session_state.get('trigger_review_export', False):
+            st.session_state.trigger_review_export = False
+            
+            with st.spinner("Generating comprehensive review report..."):
+                review_report = generate_review_export_report(results["reviews"], results)
+                
+                # Provide download button
+                st.download_button(
+                    label="💾 Download Expert Review Report",
+                    data=review_report,
+                    file_name=f"expert_review_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                    mime="text/plain",
+                    type="primary"
+                )
+                st.success("✅ Review report generated! Click above to download.")
     
     # Display chatbot interface
     st.markdown("---")
@@ -7631,5 +9172,213 @@ def display_results(results):
         st.image(anim_path, caption="Wake Flow Evolution (TT-OpInf Model)")
 
 
+def display_checkpoint_review_short(review, checkpoint_name):
+    """Display a short bullet-point checkpoint review immediately after agent completes."""
+    if review is None or not review.get("findings"):
+        return
+    
+    severity = review.get("severity", "info")
+    findings = review.get("findings", [])
+    
+    # Count critical and warning findings
+    critical_count = sum(1 for f in findings if f.get("type") == "critical")
+    warning_count = sum(1 for f in findings if f.get("type") == "warning")
+    
+    # Display header with color code
+    if severity == "critical":
+        st.error(f"🔴 **Expert Review - {checkpoint_name}**: {critical_count} critical issue(s)")
+    elif severity == "warning":
+        st.warning(f"⚠️ **Expert Review - {checkpoint_name}**: {warning_count} warning(s)")
+    else:
+        st.success(f"✅ **Expert Review - {checkpoint_name}**: All checks passed")
+    
+    # Show top 3 findings as bullets
+    display_findings = findings[:3]
+    for finding in display_findings:
+        finding_type = finding.get("type", "info")
+        message = finding.get("message", "")[:100]  # Truncate to 100 chars
+        
+        if finding_type == "critical":
+            st.markdown(f"- 🔴 {message}")
+        elif finding_type == "warning":
+            st.markdown(f"- ⚠️ {message}")
+        else:
+            st.markdown(f"- ✅ {message}")
+    
+    if len(findings) > 3:
+        st.caption(f"... and {len(findings) - 3} more finding(s). See comprehensive review for details.")
+
+
+def generate_review_export_report(reviews, results):
+    """Generate a comprehensive review report for export."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    location = results.get("location", "Unknown")
+    
+    report = f"""╔═══════════════════════════════════════════════════════════════════════════════╗
+║                    EXPERT REVIEW COMPREHENSIVE REPORT                         ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  Generated: {timestamp:<64} ║
+║  Location:  {location:<64} ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+"""
+    
+    # Final Review Summary
+    final_review = reviews.get("final_review", {})
+    if final_review:
+        status = final_review.get("overall_status", "UNKNOWN")
+        status_message = final_review.get("status_message", "")
+        
+        report += f"""┌───────────────────────────────────────────────────────────────────────────────┐
+│ OVERALL ASSESSMENT                                                            │
+├───────────────────────────────────────────────────────────────────────────────┤
+│  Status: {status:<70} │
+│  {status_message:<76} │
+│                                                                               │
+│  Critical Issues: {final_review.get('critical_count', 0):<58} │
+│  Warnings:        {final_review.get('warning_count', 0):<58} │
+│  Info Messages:   {final_review.get('info_count', 0):<58} │
+│  Checkpoints:     {final_review.get('checkpoint_count', 0):<58} │
+└───────────────────────────────────────────────────────────────────────────────┘
+
+"""
+    
+    # Detailed Checkpoint Reviews
+    checkpoint_names = [
+        ("checkpoint1_agent2", "Checkpoint 1: Agent 2 (Weather & Yaw)"),
+        ("checkpoint2_agent3", "Checkpoint 2: Agent 3 (Power & Optimization)"),
+        ("checkpoint3_agent4", "Checkpoint 3: Agent 4 (Wake Flow)")
+    ]
+    
+    for checkpoint_key, checkpoint_title in checkpoint_names:
+        review = reviews.get(checkpoint_key)
+        if review:
+            severity = review.get("severity", "info").upper()
+            findings = review.get("findings", [])
+            llm_assessment = review.get("llm_assessment", "")
+            
+            report += f"""┌───────────────────────────────────────────────────────────────────────────────┐
+│ {checkpoint_title:<77} │
+├───────────────────────────────────────────────────────────────────────────────┤
+│  Severity: {severity:<69} │
+│                                                                               │
+│  Findings:                                                                    │
+"""
+            
+            for finding in findings:
+                finding_type = finding.get("type", "info").upper()
+                message = finding.get("message", "")
+                rule = finding.get("rule", "unknown")
+                
+                # Wrap long messages
+                lines = [message[i:i+70] for i in range(0, len(message), 70)]
+                report += f"│  [{finding_type:8}] {lines[0]:<65} │\n"
+                for line in lines[1:]:
+                    report += f"│              {line:<65} │\n"
+                report += f"│              Rule: {rule:<57} │\n"
+            
+            if llm_assessment:
+                report += f"│                                                                               │\n"
+                report += f"│  LLM Expert Assessment:                                                       │\n"
+                # Wrap LLM assessment
+                assessment_lines = [llm_assessment[i:i+72] for i in range(0, len(llm_assessment), 72)]
+                for line in assessment_lines[:10]:  # Limit to 10 lines
+                    report += f"│  {line:<77} │\n"
+            
+            report += f"└───────────────────────────────────────────────────────────────────────────────┘\n\n"
+    
+    # Recommendations
+    if final_review and final_review.get("recommendations"):
+        report += f"""┌───────────────────────────────────────────────────────────────────────────────┐
+│ EXPERT RECOMMENDATIONS                                                        │
+├───────────────────────────────────────────────────────────────────────────────┤
+"""
+        for i, rec in enumerate(final_review["recommendations"], 1):
+            # Strip emojis
+            clean_rec = rec.replace("✅", "").replace("⚠️", "").replace("🔴", "").strip()
+            # Wrap long recommendations
+            lines = [clean_rec[i:i+72] for i in range(0, len(clean_rec), 72)]
+            report += f"│  {i}. {lines[0]:<75} │\n"
+            for line in lines[1:]:
+                report += f"│     {line:<75} │\n"
+        
+        report += f"└───────────────────────────────────────────────────────────────────────────────┘\n\n"
+    
+    report += f"""═══════════════════════════════════════════════════════════════════════════════
+                         END OF EXPERT REVIEW REPORT
+═══════════════════════════════════════════════════════════════════════════════
+"""
+    
+    return report
+
+
+def display_expert_review(reviews):
+    """Display expert reviewer assessment with findings and recommendations."""
+    final_review = reviews.get("final_review", {})
+    
+    if not final_review:
+        return
+    
+    # Overall status
+    status = final_review.get("overall_status", "UNKNOWN")
+    status_message = final_review.get("status_message", "")
+    
+    # Color-coded status display
+    if status == "APPROVED":
+        st.success(f"✅ **{status}**: {status_message}")
+    elif status == "WARNING":
+        st.warning(f"⚠️ **{status}**: {status_message}")
+    else:  # FAILED
+        st.error(f"🔴 **{status}**: {status_message}")
+    
+    # Statistics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Critical Issues", final_review.get("critical_count", 0))
+    with col2:
+        st.metric("Warnings", final_review.get("warning_count", 0))
+    with col3:
+        st.metric("Info Messages", final_review.get("info_count", 0))
+    with col4:
+        st.metric("Checkpoints", final_review.get("checkpoint_count", 0))
+    
+    # Key Findings
+    key_findings = final_review.get("key_findings", [])
+    if key_findings:
+        with st.expander("🔍 Key Findings", expanded=True):
+            for finding in key_findings:
+                finding_type = finding.get("type", "info")
+                message = finding.get("message", "")
+                
+                if finding_type == "critical":
+                    st.error(f"🔴 **CRITICAL**: {message}")
+                elif finding_type == "warning":
+                    st.warning(f"⚠️ **WARNING**: {message}")
+                else:
+                    st.info(f"ℹ️ {message}")
+    
+    # Recommendations
+    recommendations = final_review.get("recommendations", [])
+    if recommendations:
+        with st.expander("💡 Recommendations", expanded=True):
+            for rec in recommendations:
+                st.markdown(f"- {rec}")
+    
+    # Export Comprehensive Review Report
+    st.markdown("---")
+    st.markdown("**📥 Export Comprehensive Review Report**")
+    
+    col_export1, col_export2 = st.columns([3, 1])
+    with col_export1:
+        st.caption("Generate a detailed report with all checkpoint findings, LLM assessments, and recommendations (separate from main analysis report)")
+    with col_export2:
+        # Get parent results to pass context
+        if st.button("📄 Generate & Download Report", type="secondary"):
+            # This will be handled by the parent function that has access to full results
+            st.session_state.trigger_review_export = True
+            st.rerun()
+
+
 if __name__ == "__main__":
     main()
+

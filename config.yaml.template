@@ -13,3 +13,26 @@ llm:
   temperature: 0.1  # Lower = more deterministic (0.0-1.0)
   max_tokens: 200000  # Maximum tokens for output generation
   timeout: 1000.0  # Request timeout in seconds
+
+# Expert Reviewer Agent Configuration
+reviewer:
+  # Enable/disable reviewer globally (can be overridden in GUI)
+  enabled: true  
+  
+  # Reviewer mode: "advisory" or "blocking"
+  # - advisory: Provides feedback but never halts workflow (recommended for exploration)
+  # - blocking: Stops analysis on critical issues (recommended for production)
+  mode: "advisory"
+  
+  # LLM provider configuration for reviewer
+  use_same_provider_as_agent2b: true  # If true, uses llm settings above
+  
+  # Optional: Override with dedicated reviewer LLM settings (uncomment to use)
+  # provider: "openai"  # Options: ntnu, openai, anthropic, google, ollama
+  # model: "gpt-4o"
+  # api_key: "<YOUR_REVIEWER_API_KEY>"
+  # api_base: "https://api.openai.com/v1"
+  
+  # Reviewer LLM parameters
+  temperature: 0.3  # Balance between deterministic and insightful (0.0-1.0)
+  max_tokens: 1500  # Max tokens per review checkpoint (detailed feedback)

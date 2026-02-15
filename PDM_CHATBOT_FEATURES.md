@@ -265,8 +265,8 @@ $env:ANTHROPIC_API_KEY = "sk-ant-your-key"
 ```
 
 ### NTNU Configuration
-Hardcoded in code (no setup required):
-- API Key: `sk-48COknyy7BlFg8vbN1ywgg`
+Set via `.env` file or Streamlit secrets (see `.env.example`):
+- API Key: Set `NTNU_API_KEY` in `.env` or Streamlit Cloud secrets
 - API Base: `https://llm.hpc.ntnu.no/v1`
 
 ### Ollama Configuration

@@ -3,7 +3,7 @@
 
 llm:
   # API Configuration
-  api_key: "sk-48COknyy7BlFg8vbN1ywgg"  # Replace with your actual API key
+  api_key: "${NTNU_API_KEY}"  # Loaded from .env or Streamlit secrets (never hardcode!)
   api_base: "https://llm.hpc.ntnu.no/v1"  # Base URL of your local LLM server
   
   # Model Configuration
@@ -13,3 +13,26 @@ llm:
   temperature: 0.1  # Lower = more deterministic, Higher = more creative
   max_tokens: 100000  # Maximum tokens for output generation
   timeout: 4000.0  # Request timeout in seconds
+
+# Expert Reviewer Agent Configuration
+reviewer:
+  # Enable/disable reviewer globally (can be overridden in GUI)
+  enabled: true  
+  
+  # Reviewer mode: "advisory" or "blocking"
+  # - advisory: Provides feedback but never halts workflow
+  # - blocking: Stops analysis on critical issues (e.g., optimization below cut-in wind speed)
+  mode: "advisory"
+  
+  # LLM provider configuration for reviewer
+  use_same_provider_as_agent2b: true  # If true, uses llm settings above
+  
+  # Optional: Override with dedicated reviewer LLM settings
+  # provider: "openai"  # Options: ntnu, openai, anthropic, google, ollama
+  # model: "gpt-4o"
+  # api_key: "your-api-key"
+  # api_base: "https://api.openai.com/v1"
+  
+  # Reviewer LLM parameters
+  temperature: 0.3  # Balance between deterministic and insightful
+  max_tokens: 1500  # Max tokens per review (detailed feedback)
