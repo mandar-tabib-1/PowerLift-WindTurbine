@@ -335,6 +335,9 @@ The system includes comprehensive fault diagnosis with 15+ monitored components:
 
 [Add your license information]
 
+## Acknowledgement
+NTNU for providing short-term access to the local LLM at IDUN computational facility for enabling this academic testing and funding from SEP and Northwind FME. Mandar Tabib.
+
 ## Citation
 
 If you use this software in your research, please cite:
@@ -347,3 +350,4 @@ If you use this software in your research, please cite:
   year={2025},
   url={https://github.com/mandar-tabib-1/PowerLift-WindTurbine.git}
 }
+
