@@ -84,6 +84,210 @@ def get_api_config(provider: str) -> tuple:
 
     return api_base, api_key
 
+
+def test_llm_connection(provider: str, model: str) -> dict:
+    """
+    Actually test LLM connection by making a lightweight API call.
+    
+    Args:
+        provider: LLM provider name (NTNU, OpenAI, etc.)
+        model: Model name to test
+    
+    Returns:
+        dict with keys: 'success', 'status', 'message', 'error_details'
+    """
+    import requests
+    import json
+    
+    api_base, api_key = get_api_config(provider)
+    
+    result = {
+        'success': False,
+        'status': 'unknown',
+        'message': '',
+        'error_details': ''
+    }
+    
+    # Check if API key exists
+    if not api_key or api_key == "":
+        if provider == "Ollama":
+            result['status'] = 'no_key_required'
+        else:
+            result['status'] = 'no_api_key'
+            result['message'] = f"❌ No API key found for {provider}"
+            result['error_details'] = "Configure API key in .env file or Streamlit secrets"
+            return result
+    
+    try:
+        if provider == "Ollama":
+            # Test Ollama local server
+            response = requests.get(f"{api_base.replace('/v1', '')}/api/tags", timeout=5)
+            if response.status_code == 200:
+                result['success'] = True
+                result['status'] = 'connected'
+                result['message'] = f"✅ Ollama server running at {api_base}"
+            else:
+                result['status'] = 'server_error'
+                result['message'] = f"❌ Ollama server error (status {response.status_code})"
+                result['error_details'] = "Is Ollama running? Try: ollama serve"
+                
+        elif provider == "NTNU":
+            # Test NTNU API with minimal request
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 5
+            }
+            response = requests.post(
+                f"{api_base}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result['success'] = True
+                result['status'] = 'connected'
+                result['message'] = f"✅ Connected to NTNU LLM ({model})"
+            elif response.status_code == 401:
+                result['status'] = 'invalid_key'
+                result['message'] = "❌ Invalid API key"
+                result['error_details'] = "Check your NTNU_API_KEY in .env"
+            elif response.status_code == 404:
+                result['status'] = 'model_not_found'
+                result['message'] = f"❌ Model '{model}' not available"
+                result['error_details'] = "Try a different model from the dropdown"
+            elif response.status_code == 429:
+                result['status'] = 'rate_limit'
+                result['message'] = "⚠️ Rate limit exceeded"
+                result['error_details'] = "Wait a moment and try again"
+            else:
+                result['status'] = 'api_error'
+                result['message'] = f"❌ API error (status {response.status_code})"
+                result['error_details'] = response.text[:200]
+                
+        elif provider == "OpenAI":
+            # Test OpenAI API
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 5
+            }
+            response = requests.post(
+                f"{api_base}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result['success'] = True
+                result['status'] = 'connected'
+                result['message'] = f"✅ Connected to OpenAI ({model})"
+            elif response.status_code == 401:
+                result['status'] = 'invalid_key'
+                result['message'] = "❌ Invalid OpenAI API key"
+                result['error_details'] = "Check your OPENAI_API_KEY"
+            elif response.status_code == 404:
+                result['status'] = 'model_not_found'
+                result['message'] = f"❌ Model '{model}' not found"
+                result['error_details'] = "You may not have access to this model"
+            elif response.status_code == 429:
+                result['status'] = 'rate_limit'
+                result['message'] = "⚠️ Rate limit or quota exceeded"
+                result['error_details'] = "Check your OpenAI billing/limits"
+            else:
+                result['status'] = 'api_error'
+                result['message'] = f"❌ OpenAI API error ({response.status_code})"
+                result['error_details'] = response.text[:200]
+                
+        elif provider == "Google":
+            # Test Google Gemini API
+            response = requests.post(
+                f"{api_base}/models/{model}:generateContent?key={api_key}",
+                json={"contents": [{"parts": [{"text": "test"}]}]},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result['success'] = True
+                result['status'] = 'connected'
+                result['message'] = f"✅ Connected to Google Gemini ({model})"
+            elif response.status_code == 400:
+                error_data = response.json()
+                if "API key not valid" in str(error_data):
+                    result['status'] = 'invalid_key'
+                    result['message'] = "❌ Invalid Google API key"
+                    result['error_details'] = "Check your GOOGLE_API_KEY"
+                else:
+                    result['status'] = 'api_error'
+                    result['message'] = f"❌ Google API error"
+                    result['error_details'] = str(error_data)[:200]
+            else:
+                result['status'] = 'api_error'
+                result['message'] = f"❌ API error (status {response.status_code})"
+                result['error_details'] = response.text[:200]
+                
+        elif provider == "Anthropic":
+            # Test Anthropic Claude API
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            }
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 5
+            }
+            response = requests.post(
+                f"{api_base}/messages",
+                headers=headers,
+                json=payload,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result['success'] = True
+                result['status'] = 'connected'
+                result['message'] = f"✅ Connected to Anthropic ({model})"
+            elif response.status_code == 401:
+                result['status'] = 'invalid_key'
+                result['message'] = "❌ Invalid Anthropic API key"
+                result['error_details'] = "Check your ANTHROPIC_API_KEY"
+            elif response.status_code == 429:
+                result['status'] = 'rate_limit'
+                result['message'] = "⚠️ Rate limit exceeded"
+                result['error_details'] = "Wait and try again"
+            else:
+                result['status'] = 'api_error'
+                result['message'] = f"❌ API error (status {response.status_code})"
+                result['error_details'] = response.text[:200]
+                
+    except requests.exceptions.ConnectionError:
+        result['status'] = 'connection_error'
+        result['message'] = "❌ Cannot connect to API server"
+        result['error_details'] = "Check your internet connection or firewall"
+    except requests.exceptions.Timeout:
+        result['status'] = 'timeout'
+        result['message'] = "❌ Connection timeout"
+        result['error_details'] = "Server not responding, try again"
+    except Exception as e:
+        result['status'] = 'error'
+        result['message'] = f"❌ Unexpected error: {type(e).__name__}"
+        result['error_details'] = str(e)[:200]
+    
+    return result
+
+
 # Page configuration
 st.set_page_config(
     page_title="Wind Turbine Analysis System",
@@ -152,6 +356,12 @@ if 'pdm_results' not in st.session_state:
     st.session_state.pdm_results = None
 if 'pdm_models' not in st.session_state:
     st.session_state.pdm_models = None
+if 'whatif_mode_enabled' not in st.session_state:
+    st.session_state.whatif_mode_enabled = False
+if 'whatif_wind_speed' not in st.session_state:
+    st.session_state.whatif_wind_speed = 8.5  # Default above cut-in
+if 'whatif_wind_direction' not in st.session_state:
+    st.session_state.whatif_wind_direction = 270.0  # Default westerly
 
 
 # =============================================================================
@@ -5903,7 +6113,7 @@ def main():
         # WIND FARM ANALYSIS MODE CONTROLS
         # =================================================================
         else:  # Wind Farm Analysis mode
-            st.header("🤖 LLM Configuration (Agent 2B)")
+            st.header("🤖 LLM Configuration")
             st.markdown("Configure the AI model for turbine analysis:")
             
             # LLM Provider Selection
@@ -5973,9 +6183,92 @@ def main():
             st.session_state.llm_provider = llm_provider
             st.session_state.selected_model = selected_model
             st.session_state.explore_vs_acc = explore_vs_acc
-            # Show current configuration
-            with st.expander("Current LLM Configuration"):
-                st.code(f"Provider: {llm_provider}\\nModel: {selected_model}", language="yaml")
+            
+            st.markdown("---")
+            
+            # LLM Connection Test
+            st.markdown("**🔍 Test LLM Connection:**")
+            st.caption("Verify your configuration before running analysis")
+            
+            test_col1, test_col2 = st.columns([1, 2])
+            with test_col1:
+                test_button = st.button("🧪 Test Connection", type="primary", use_container_width=True)
+            
+            with test_col2:
+                if 'llm_test_result' in st.session_state and st.session_state.get('last_tested_config') == f"{llm_provider}:{selected_model}":
+                    # Show cached result
+                    if st.session_state.llm_test_result['success']:
+                        st.success("✅ Connected", icon="✅")
+                    else:
+                        st.error("❌ Failed", icon="❌")
+            
+            if test_button:
+                with st.spinner(f"Testing connection to {llm_provider}..."):
+                    test_result = test_llm_connection(llm_provider, selected_model)
+                    st.session_state.llm_test_result = test_result
+                    st.session_state.last_tested_config = f"{llm_provider}:{selected_model}"
+                    st.rerun()
+            
+            # Display detailed test results
+            if 'llm_test_result' in st.session_state and st.session_state.get('last_tested_config') == f"{llm_provider}:{selected_model}":
+                test_result = st.session_state.llm_test_result
+                
+                if test_result['success']:
+                    st.success(test_result['message'])
+                else:
+                    st.error(test_result['message'])
+                    if test_result['error_details']:
+                        with st.expander("🔧 Troubleshooting Details"):
+                            st.warning(test_result['error_details'])
+                            
+                            # Provide specific guidance based on error type
+                            if test_result['status'] == 'no_api_key':
+                                st.markdown(f"""
+                                **How to fix:**
+                                1. Create/edit `.env` file in project root
+                                2. Add: `{llm_provider.upper()}_API_KEY=your_key_here`
+                                3. Restart Streamlit
+                                
+                                Or use Streamlit secrets (for cloud deployment).
+                                """)
+                            elif test_result['status'] == 'invalid_key':
+                                st.markdown("""
+                                **Possible causes:**
+                                - API key is expired or invalid
+                                - Wrong key format
+                                - Key doesn't have required permissions
+                                
+                                **Action:** Generate a new API key from provider's dashboard.
+                                """)
+                            elif test_result['status'] == 'connection_error':
+                                st.markdown("""
+                                **Possible causes:**
+                                - No internet connection
+                                - Firewall blocking requests
+                                - VPN issues
+                                - API server down
+                                
+                                **Action:** Check network and try again.
+                                """)
+                            elif test_result['status'] == 'rate_limit':
+                                st.markdown("""
+                                **Rate limit hit:**
+                                - Too many requests in short time
+                                - Free tier quota exceeded
+                                
+                                **Action:** Wait a few minutes or upgrade plan.
+                                """)
+                            elif test_result['status'] == 'model_not_found':
+                                st.markdown("""
+                                **Model not accessible:**
+                                - Model name may be incorrect
+                                - You may not have access to this model
+                                - Model may require special permissions
+                                
+                                **Action:** Try a different model from dropdown.
+                                """)
+            else:
+                st.info("💡 Click 'Test Connection' to verify your LLM configuration before running analysis.")
             
             st.markdown("---")
             
@@ -6044,6 +6337,13 @@ def main():
                     value=False,
                     help="Enable LLM-based turbine control recommendations"
                 )
+                # Warn if enabling without successful connection test
+                if enable_agent_2b:
+                    if 'llm_test_result' not in st.session_state:
+                        st.warning("⚠️ Connection not tested. Click 'Test Connection' in LLM Config above.")
+                    elif not st.session_state.llm_test_result['success']:
+                        st.error(f"❌ LLM connection failed! Agent 2B will not work.")
+                        st.caption("Fix connection issue in LLM Configuration section")
             with col2:
                 enable_agent_4 = st.checkbox(
                     "🌊 Agent 4 (Wake Flow ROM)",
@@ -6066,12 +6366,29 @@ def main():
             
             # Agent 2C/2D Selection
             st.markdown("**Turbine Pair Selection Agent:**")
+            
+            # Check if LLM connection was successfully tested
+            llm_tested = 'llm_test_result' in st.session_state
+            llm_success = llm_tested and st.session_state.llm_test_result.get('success', False)
+            
+            # Smart default: use 2C only if connection verified
+            default_index = 0 if llm_success else 1
+            
             agent_selection = st.radio(
                 "Choose turbine pair identification method:",
                 options=["Agent 2C (LLM-based)", "Agent 2D (Physical Wake Model)"],
-                index=1,
+                index=default_index,
                 help="Agent 2C uses AI/LLM for intelligent analysis. Agent 2D uses physical wake models as backup when LLM is unavailable."
             )
+            
+            # Warn if selecting Agent 2C without successful test
+            if "2C" in agent_selection:
+                if not llm_tested:
+                    st.warning("⚠️ LLM connection not tested. Agent 2C may fail.")
+                    st.caption("Test connection in 'LLM Configuration' section above")
+                elif not llm_success:
+                    st.error(f"❌ LLM connection failed! Agent 2C will not work.")
+                    st.info("💡 **Recommendation:** Use Agent 2D or fix LLM connection")
             
             # Store selection in session state
             st.session_state.selected_agent = "2C" if "2C" in agent_selection else "2D"
@@ -6103,9 +6420,9 @@ def main():
                 "Select method for wake steering optimization:",
                 options=['analytical_physics', 'ml_surrogate', 'grid_search', 'bayesian_transfer'], #'ml_wake_extraction' option.
                 format_func=lambda x: {
-                    'ml_surrogate': '🧠 ML Surrogate AD (Most Accurate)',
+                    'ml_surrogate': '🧠 ML Surrogate Auto-Diff',
                     'analytical_physics': '📐 Analytical Physics AD (Fastest)',
-                    'ml_wake_extraction': '🎯 ML Wake Extraction (Expert Approach)',
+                   # 'ml_wake_extraction': '🎯 ML Wake Extraction (Expert Approach)',
                     'grid_search': '🔍 Grid Search (Brute-force)',
                     'bayesian_transfer': '🎯 Bayesian Optimization (Transfer Learning)'
                 }[x],
@@ -6217,6 +6534,63 @@ def main():
                     """)
             else:
                 st.session_state.reviewer_enabled = False
+            
+            st.markdown("---")
+            
+            # What-If Analysis Mode
+            st.header("🔬 What-If Analysis Mode")
+            st.markdown("Override Agent 1 weather data with manual inputs for scenario testing")
+            
+            whatif_enabled = st.checkbox(
+                "⚙️ Enable Manual Weather Override",
+                value=st.session_state.get('whatif_mode_enabled', False),
+                help="Bypass Agent 1 weather API and use manual wind conditions for demonstration"
+            )
+            
+            if whatif_enabled:
+                st.info("🔄 **What-If Mode Active**: Agent 1 weather fetch will be bypassed with your manual inputs")
+                
+                whatif_wind_speed = st.number_input(
+                    "Wind Speed (m/s)",
+                    min_value=3.5,
+                    max_value=25.0,
+                    value=st.session_state.get('whatif_wind_speed', 8.5),
+                    step=0.5,
+                    help="Must be between cut-in (3.5 m/s) and cut-out (25.0 m/s)"
+                )
+                
+                whatif_wind_direction = st.number_input(
+                    "Wind Direction (degrees)",
+                    min_value=0.0,
+                    max_value=360.0,
+                    value=st.session_state.get('whatif_wind_direction', 270.0),
+                    step=5.0,
+                    help="0° = North, 90° = East, 180° = South, 270° = West"
+                )
+                
+                # Store in session state
+                st.session_state.whatif_mode_enabled = whatif_enabled
+                st.session_state.whatif_wind_speed = whatif_wind_speed
+                st.session_state.whatif_wind_direction = whatif_wind_direction
+                
+                # Validation warnings
+                if whatif_wind_speed < 3.5:
+                    st.warning(f"⚠️ Wind speed {whatif_wind_speed:.1f} m/s is barely above cut-in. Consider using ≥3.5 m/s for meaningful optimization.")
+                elif whatif_wind_speed > 25.0:
+                    st.error(f"⛔ Wind speed {whatif_wind_speed:.1f} m/s exceeds cut-out (25.0 m/s). Turbine will shut down.")
+                
+                if whatif_wind_direction < 270 or whatif_wind_direction > 285:
+                    st.info(f"ℹ️ Wind direction {whatif_wind_direction:.0f}° is outside ROM training range (270-285°). Results may be less accurate.")
+                
+                # Show preview
+                with st.expander("📊 Preview What-If Conditions"):
+                    pcol1, pcol2 = st.columns(2)
+                    with pcol1:
+                        st.metric("Override Wind Speed", f"{whatif_wind_speed:.1f} m/s")
+                    with pcol2:
+                        st.metric("Override Wind Direction", f"{whatif_wind_direction:.0f}°")
+            else:
+                st.session_state.whatif_mode_enabled = False
             
             st.markdown("---")
             
@@ -6995,13 +7369,33 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
         progress_bar.progress(10)
         time.sleep(0.5)
         
-        # Fetch weather using farm coordinates
-        weather = fetch_weather_for_farm(selected_farm, farm_info)
+        # Check if What-If mode is enabled
+        if st.session_state.get('whatif_mode_enabled', False):
+            # Override with manual inputs
+            weather = {
+                "location": f"{selected_farm}, {farm_info['location']}",
+                "latitude": farm_info["latitude"],
+                "longitude": farm_info["longitude"],
+                "wind_speed_ms": st.session_state.whatif_wind_speed,
+                "wind_direction_deg": st.session_state.whatif_wind_direction,
+                "temperature_c": 10.0,  # Default reasonable value
+                "data_source": "What-If Manual Override",
+                "farm_name": selected_farm
+            }
+            yr_weather = {
+                "wind_speed_ms": st.session_state.whatif_wind_speed,
+                "wind_direction_deg": st.session_state.whatif_wind_direction,
+                "data_source": "What-If Manual Override (yr.no display)"
+            }
+            st.info("🔬 **What-If Mode Active**: Using manual weather inputs instead of Agent 1 API fetch")
+        else:
+            # Normal path: fetch from API
+            weather = fetch_weather_for_farm(selected_farm, farm_info)
+            # Agent 1A: Fetch weather from yr.no (Met.no)
+            yr_weather = fetch_weather_yr_no(farm_info["latitude"], farm_info["longitude"])
+        
         results["weather"] = weather
         progress_bar.progress(20)
-
-        # Agent 1A: Fetch weather from yr.no (Met.no)
-        yr_weather = fetch_weather_yr_no(farm_info["latitude"], farm_info["longitude"])
         results["yr_weather"] = yr_weather
     
     # Display wind farm information with tabs
@@ -7027,6 +7421,10 @@ def run_full_analysis(selected_farm: str, n_timesteps: int, export_vtk: bool):
             st.metric("💨 Wind Speed", f"{results['weather']['wind_speed_ms']:.1f} m/s")
             st.metric("🌡️ Temperature", f"{results['weather']['temperature_c']:.1f}°C")
             st.caption(f"Data source: {results['weather']['data_source']}")
+            
+            # Show What-If mode indicator
+            if st.session_state.get('whatif_mode_enabled', False):
+                st.warning("🔬 **WHAT-IF MODE ACTIVE**: Weather data manually overridden. Agent 1 weather API was bypassed.")
         with wcol2:
             st.markdown("#### Agent 1A: yr.no (Met.no) Weather Data")
             # Debug: Show raw API response for troubleshooting
