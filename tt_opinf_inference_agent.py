@@ -39,7 +39,7 @@ RESULT_ML_YAW = SCRIPT_DIR.parent  # ResultMLYaw folder
 PROJECT_ROOT = RESULT_ML_YAW.parent  # HAM_Wind_Energy folder (where TT_OpInf is)
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Import TT-OpInf module
+# Import TT-OpInf module (now local)
 from TT_OpInf.tt_opinf import TT_OpInf
 
 

@@ -169,6 +169,10 @@ PowerLift/
 |   |-- google_llm.py           # Google Gemini provider
 |   |-- ollama.py               # Local Ollama provider
 |
+|-- TT_OpInf/                   # Tensor Train + OpInf ROM module (local)
+|   |-- __init__.py             # TT_OpInf module initialization
+|   |-- tt_opinf.py             # Main TT-OpInf class with fit/predict methods
+|
 |-- models/                     # Pre-trained model files
 |   |-- tt_opinf_model/
 |       |-- metadata.npz        # Model metadata (grid info, normalization)
@@ -275,6 +279,8 @@ The system produces structured outputs at each stage:
 
 ## Deployment (Streamlit Cloud)
 
+**✅ TT_OpInf ROM module now included locally** - No external dependencies needed!
+
 1. Push your code to GitHub (`.env` and `secrets.toml` are gitignored)
 2. Connect your repo on [Streamlit Cloud](https://streamlit.io/cloud)
 3. In the app dashboard, go to **Settings > Secrets** and add:
@@ -283,6 +289,8 @@ The system produces structured outputs at each stage:
    NTNU_API_BASE = "https://llm.hpc.ntnu.no/v1"
    ```
 4. Deploy - the app reads secrets automatically via `st.secrets`
+
+**Note**: The TT_OpInf (Tensor Train + Operator Inference) module is now included as a local module, eliminating deployment issues related to missing ROM dependencies.
 
 ---
 
@@ -324,6 +332,10 @@ The system includes comprehensive fault diagnosis with 15+ monitored components:
    ```bash
    streamlit run wind_turbine_gui.py --server.port 8506
    ```
+
+### ✅ Resolved Issues
+
+- **TT_OpInf Module Not Found**: ~~Previously caused deployment failures~~ → **FIXED**: TT_OpInf ROM module now included locally in the repository
 
 ## Contact
 
