@@ -1,4 +1,8 @@
-# A step towards Wind Turbine Multi-Agent AI Analysis System for predictive maintainance and optimization by mandar.tabib@sintef.no
+# Wind Turbine Multi-Agent AI Analysis System
+
+🌀 **Advanced wind turbine analysis and optimization using multiple AI agents for predictive maintenance and farm optimization**
+
+*Developed by mandar.tabib@sintef.no*
 
 ## Overview
 This system integrates multiple AI agents and Large Language models for wind turbine operations analysis. It is an exploratory work and has potential for developments.
@@ -8,13 +12,8 @@ This system integrates multiple AI agents and Large Language models for wind tur
 - **Agent 3**: Wake Steering Optimizer - Multi-turbine farm optimization
 - **Agent 4**: Flow AI Agent - Wake flow simulation using ROM models
 - **Agent 5**: Power AI - Gaussian Process power prediction
-- **Agent 6**: Predictive Maintenance - Health monitoring and RUL estimation using Autoencoder + GMM + LSTM .
+- **Agent 6**: Predictive Maintenance - Health monitoring and RUL estimation using Autoencoder + GMM + LSTM
 
-## Contact
-
-**Developer**: Mandar Tabib  
-**Email**: mandar.tabib@sintef.no  
-**Organization**: SINTEF Digital  
 ## Features
 
 - 🌤️ **Real-time weather integration** (Open-Meteo, yr.no APIs)
@@ -24,10 +23,21 @@ This system integrates multiple AI agents and Large Language models for wind tur
 - ⚡ **Uncertainty-aware power prediction** (Gaussian Process)
 - 🏥 **Predictive maintenance** with RUL estimation
 - 🗺️ **Norwegian wind farm integration** with turbine location mapping
+- 🔧 **Comprehensive fault diagnosis** with SHAP-based explainability
+- 💬 **PdM Chatbot** for maintenance insights
+- 🎛️ **What-if analysis mode** for scenario testing
+
+## Norwegian Wind Farms Supported
+
+- ✅ **Bessaker Wind Farm** (25 turbines, 57.5 MW) - Bessakerfjellet, Åfjord, Trøndelag
+- ✅ **Smøla Wind Farm** (68 turbines, 150 MW) - One of Norway's oldest and largest wind farms
+- ✅ **Tonstad Wind Farm** (51 turbines, 208 MW) - One of Norway's largest onshore wind farms
+- ✅ **Roan Wind Farm** (71 turbines, 255.6 MW) - Part of the Fosen Vind project
+- ✅ **Raggovidda Wind Farm** (15 turbines, 45 MW) - Norway's northernmost wind farm
 
 ## Architecture
 
-The system coordinates  specialized ML algorithms and Large Languate model in agentic framework to test real-time turbine operation recommendations, power optimization, and 3D wake flow visualization through a Streamlit web interface.
+The system coordinates specialized ML algorithms and Large Language models in an agentic framework to deliver real-time turbine operation recommendations, power optimization, and 3D wake flow visualization through a Streamlit web interface.
 
 ---
 
@@ -103,13 +113,13 @@ source .venv/bin/activate
 streamlit run wind_turbine_gui.py
 ```
 
-The app will open at `http://localhost:8501`.
+The app will open at `http://localhost:8501` (or use `--server.port 8506` for custom port).
 
 ---
 
-## Architecture
+## Multi-Agent Architecture
 
-The system consists of **4 AI agents** + an **Expert Reviewer**:
+The system consists of **6 specialized AI agents** + an **Expert Reviewer**:
 
 | Agent | Name | Description |
 |-------|------|-------------|
@@ -117,8 +127,10 @@ The system consists of **4 AI agents** + an **Expert Reviewer**:
 | 2 | **Turbine Expert** | NREL 5MW reference turbine specs + LLM-based yaw optimization |
 | 2B | **LLM Expert** | Multi-provider LLM for advanced analysis (NTNU/OpenAI/Anthropic/Google/Ollama) |
 | 2C/2D | **Pair Selector** | Identifies upstream-downstream turbine pairs for wake analysis |
-| 3 | **Power Predictor** | Gaussian Process model trained on CFD data with uncertainty quantification |
-| 4 | **Wake Flow Simulator** | TT-OpInf (Tensor-Train Operator Inference) reduced-order model for 3D velocity fields |
+| 3 | **Wake Steering Optimizer** | Multi-turbine farm optimization for power maximization |
+| 4 | **Flow AI Agent** | TT-OpInf (Tensor-Train Operator Inference) reduced-order model for 3D velocity fields |
+| 5 | **Power AI** | Gaussian Process model trained on CFD data with uncertainty quantification |
+| 6 | **Predictive Maintenance** | Health monitoring with RUL estimation using Autoencoder + GMM + LSTM |
 | R | **Expert Reviewer** | LLM-based validation at critical checkpoints (advisory or blocking mode) |
 
 ---
@@ -146,6 +158,7 @@ PowerLift/
 |-- reviewer_agent.py           # Expert LLM reviewer agent
 |-- shap_interpreter.py         # SHAP-based model interpretability
 |-- wake_animation.py           # Wake flow animation utilities
+|-- verify_wake_spacing.py      # Wake spacing verification utilities
 |
 |-- llm/                        # Multi-provider LLM interface
 |   |-- __init__.py
@@ -171,6 +184,14 @@ PowerLift/
 |-- RUL/                        # Predictive Maintenance module
 |   |-- save_models.py          # PdM model loading utilities
 |   |-- wind_turbine_pm_fuhrlander.py # Fuhrlander turbine PdM models
+|   |-- wind_turbine_pm_sklearn.py    # Sklearn-based PdM models
+|   |-- shap_explainer.py       # SHAP-based model interpretability
+|   |-- inference_viz.py        # PdM inference visualization
+|   |-- saved_models/           # Pre-trained PdM model files
+|       |-- fuhrlander_fl2500_pm_models.joblib
+|       |-- metadata.json
+|       |-- test_data.npz
+|   |-- fuhrlander-master/      # Fuhrlander dataset and examples
 ```
 
 ---
@@ -265,10 +286,44 @@ The system produces structured outputs at each stage:
 
 ---
 
+## Predictive Maintenance Features
+
+### Fault Diagnosis Mapping
+The system includes comprehensive fault diagnosis with 15+ monitored components:
+- **Gearbox Components**: Temperature monitoring, oil pressure, bearing conditions
+- **Generator Systems**: Winding temperatures, bearing health, speed variability
+- **Main Bearings**: Oil pressure, temperature balance
+- **Performance Metrics**: Power efficiency, thermal/bearing stress indices
+
+### SHAP-based Explainability
+- Root cause analysis for detected anomalies
+- Maintenance action recommendations with cost estimates
+- Urgency classification (LOW/MEDIUM/HIGH/CRITICAL)
+
 ### Machine Learning Models
 - **Wake Flow**: Tensor Train + Operator Inference ROM 
 - **Power**: Gaussian Process Regressor with uncertainty quantification
 - **Health**: Autoencoder + GMM + LSTM for predictive maintenance
+- **Fault Diagnosis**: SHAP explainer integration for interpretable predictions
+
+## Troubleshooting
+
+### Common Issues
+
+1. **LLM Connection Error**: If you see "Could not connect to LLM. Error: query_local_llm() got an unexpected keyword argument 'temperature'"
+   - Ensure your LLM provider configuration is correct in the GUI sidebar
+   - Check API keys in `.env` file
+   - Try switching to a different LLM provider
+
+2. **Missing Dependencies**: If packages are missing, run:
+   ```bash
+   uv sync --all-extras
+   ```
+
+3. **Port Conflicts**: If port 8501 is busy:
+   ```bash
+   streamlit run wind_turbine_gui.py --server.port 8506
+   ```
 
 ## Contact
 
@@ -289,6 +344,6 @@ If you use this software in your research, please cite:
   title={Wind Turbine Multi-Agent AI Analysis System},
   author={Tabib, Mandar},
   organization={SINTEF Digital},
-  year={2024},
-  url={https://github.com/your-username/PowerLift}
+  year={2025},
+  url={https://github.com/mandar-tabib-1/PowerLift-WindTurbine.git}
 }
