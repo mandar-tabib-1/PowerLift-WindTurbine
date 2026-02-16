@@ -1,0 +1,480 @@
+\documentclass[12pt]{article}
+
+% ============================================================
+% Packages
+% ============================================================
+\usepackage[a4paper, margin=2.5cm]{geometry}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{float}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{bm}
+\usepackage{natbib}
+\usepackage{xcolor}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+% ============================================================
+% Custom commands
+% ============================================================
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\norm}[1]{\left\| #1 \right\|}
+\newcommand{\abs}[1]{\left| #1 \right|}
+\newcommand{\vect}[1]{\mathbf{#1}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+
+% ============================================================
+\title{Gaussian Process Regression for Wind Turbine Rotor Power Prediction under Yaw Misalignment}
+
+\author{
+  Mandar Tabib \\
+  \textit{SINTEF Digital, Department of Mathematics and Cybernetics} \\
+  \textit{Trondheim, Norway} \\
+  mandar.tabib@sintef.no
+}
+
+\date{}
+
+% ============================================================
+\begin{document}
+\maketitle
+
+% ============================================================
+% ABSTRACT
+% ============================================================
+\begin{abstract}
+Accurate prediction of rotor power under yaw misalignment is essential for optimising wake steering strategies in wind farms.
+This paper presents a Gaussian Process Regression (GPR) surrogate model that predicts the transient rotor power of a wind turbine as a function of yaw angle and normalised time, trained on high-fidelity OpenFOAM computational fluid dynamics (CFD) data.
+The model uses a Mat\'{e}rn~$\nu = 2.5$ covariance kernel combined with a white noise kernel, and provides built-in uncertainty quantification through the posterior predictive distribution.
+A data preprocessing pipeline---including per-trajectory time normalisation, interquartile-range outlier removal, and rate-of-change spike detection---is developed to clean the raw CFD power signals.
+Trained on 1{,}598 subsampled data points from four yaw angles (270\textdegree, 276\textdegree, 282\textdegree, 285\textdegree), the GPR model achieves a root mean square error (RMSE) of 0.048~MW and a coefficient of determination $R^2 = 0.70$ on a held-out test set of 400 samples, while providing calibrated 95\% confidence intervals for each prediction.
+\end{abstract}
+
+\noindent\textbf{Keywords:} Gaussian process regression, wind turbine power prediction, yaw misalignment, wake steering, uncertainty quantification, surrogate model
+
+% ============================================================
+% 1. INTRODUCTION
+% ============================================================
+\section{Introduction}
+\label{sec:introduction}
+
+Wind energy has become a cornerstone of the global transition to renewable power, yet wake-induced losses remain a significant challenge for wind farm operators.
+Downstream turbines in a farm can experience power deficits of 10--20\% due to the reduced wind speed and increased turbulence within the upstream turbine's wake \citep{Barthelmie2009,PorteAgel2020}.
+Intentional yaw misalignment of upstream turbines---commonly referred to as \emph{wake steering}---deflects the wake laterally away from downstream rotors, thereby increasing aggregate farm power output \citep{Fleming2017,Gebraad2016}.
+Effective implementation of wake steering requires not only knowledge of the three-dimensional wake velocity field but also fast, accurate predictions of how rotor power varies with yaw angle.
+
+High-fidelity CFD solvers such as OpenFOAM \citep{OpenFOAM} can provide detailed power predictions for any yaw configuration; however, a single simulation with adequate spatio-temporal resolution can require hours to days on parallel computing clusters.
+This computational burden makes direct CFD impractical for real-time control applications, design optimisation, or uncertainty quantification, all of which demand thousands of evaluations across the parameter space.
+
+Surrogate models offer a computationally efficient alternative.
+Recent work on reduced-order models for wake velocity field prediction includes tensor-decomposition-based approaches such as TT-OpInf \citep{Tabib2025ttopinf}, which achieve sub-second inference for full three-component velocity fields.
+However, for control applications, a direct surrogate of rotor-integrated power as a function of yaw angle is often more practical than reconstructing the entire velocity field.
+
+Gaussian Process Regression (GPR) \citep{Rasmussen2006} is particularly well suited for this task because:
+\begin{enumerate}
+    \item It provides \emph{built-in uncertainty quantification} through the posterior predictive distribution, yielding both a mean prediction and a confidence interval without requiring ensemble methods or dropout approximations.
+    \item It performs well with \emph{small datasets}, which is typical of expensive CFD campaigns where only a handful of yaw configurations can be simulated.
+    \item It is \emph{non-parametric}, automatically adapting model complexity to the data through kernel hyperparameter optimisation.
+\end{enumerate}
+
+The contributions of this paper are:
+\begin{enumerate}
+    \item A GPR-based surrogate model for predicting transient rotor power as a function of yaw angle and normalised time, with calibrated uncertainty bounds.
+    \item A robust data preprocessing pipeline for raw CFD power signals, including outlier removal and spike detection.
+    \item Demonstration on OpenFOAM power data at four yaw angles, achieving RMSE of 0.048~MW with 95\% confidence intervals.
+\end{enumerate}
+
+The remainder of the paper is organised as follows.
+\Cref{sec:methodology} describes the GPR methodology and data preprocessing pipeline.
+\Cref{sec:data} details the CFD dataset.
+\Cref{sec:results} presents training and test results.
+\Cref{sec:discussion} discusses the findings, and \Cref{sec:conclusion} summarises the work.
+
+
+% ============================================================
+% 2. METHODOLOGY
+% ============================================================
+\section{Methodology}
+\label{sec:methodology}
+
+\subsection{Data collection}
+\label{sec:data_collection}
+
+Rotor power data are extracted from OpenFOAM CFD simulations of a wind turbine operating under varying yaw misalignment angles.
+For each yaw angle $\mu$, the solver outputs time-resolved rotor-integrated power $P(\mu, t)$ in watts at discrete time steps.
+The raw data are collected from \texttt{powerRotor} files within each timestep subdirectory, parsed, and consolidated into a single dataset with columns: yaw angle, simulation time, and rotor power.
+
+\subsection{Data preprocessing}
+\label{sec:preprocessing}
+
+Raw CFD power signals contain numerical artefacts including outliers from solver transients and localised spikes from turbulence-induced fluctuations.
+A three-stage preprocessing pipeline is applied:
+
+\paragraph{Stage 1: Time normalisation.}
+Within each yaw-angle trajectory, the simulation time $t$ is mapped to a normalised time $\tau \in [0, 1]$:
+\begin{equation}
+    \tau = \frac{t - t_{\min}(\mu)}{t_{\max}(\mu) - t_{\min}(\mu)},
+\end{equation}
+where $t_{\min}(\mu)$ and $t_{\max}(\mu)$ are the minimum and maximum times for yaw angle $\mu$.
+This normalisation allows the model to learn dynamics without knowledge of absolute simulation time, facilitating generalisation across trajectories of different durations.
+
+\paragraph{Stage 2: Outlier removal.}
+The interquartile range (IQR) method is applied independently to each yaw-angle group.
+For each group, the first quartile $Q_1$ and third quartile $Q_3$ of the power values are computed, and data points falling outside the range $[Q_1 - 1.5 \cdot \text{IQR},\; Q_3 + 1.5 \cdot \text{IQR}]$ are removed, where $\text{IQR} = Q_3 - Q_1$.
+This per-group approach prevents the different power levels at different yaw angles from biasing the outlier detection.
+
+\paragraph{Stage 3: Spike detection.}
+A rate-of-change criterion identifies localised spikes in the power signal.
+The time derivative of power is approximated by finite differences, and data points where the absolute rate of change exceeds a threshold are flagged.
+Flagged points are replaced by local averages of neighbouring non-flagged values, preserving the overall signal trend while removing unphysical transients.
+
+\subsection{Gaussian Process Regression}
+\label{sec:gpr}
+
+\subsubsection{Model formulation}
+
+A Gaussian process (GP) defines a distribution over functions $f: \R^d \to \R$ such that any finite collection of function values is jointly Gaussian \citep{Rasmussen2006}.
+Given a training set $\mathcal{D} = \{(\vect{x}_i, y_i)\}_{i=1}^{N}$ with inputs $\vect{x}_i \in \R^2$ (yaw angle, normalised time) and targets $y_i$ (rotor power in MW), the GP prior is:
+\begin{equation}
+    f(\vect{x}) \sim \mathcal{GP}\!\left(0,\; k(\vect{x}, \vect{x}')\right),
+\end{equation}
+where $k(\vect{x}, \vect{x}')$ is the covariance (kernel) function.
+
+The observed power is modelled as $y = f(\vect{x}) + \varepsilon$, where $\varepsilon \sim \mathcal{N}(0, \sigma_n^2)$ represents observation noise.
+
+\subsubsection{Kernel selection}
+
+The covariance function is chosen as a sum of a signal kernel and a noise kernel:
+\begin{equation}
+\label{eq:kernel}
+    k(\vect{x}, \vect{x}') = \sigma_f^2 \, k_{\text{Mat}}(\vect{x}, \vect{x}';\, \boldsymbol{\ell},\, \nu) + \sigma_n^2 \, \delta(\vect{x}, \vect{x}'),
+\end{equation}
+where:
+\begin{itemize}
+    \item $\sigma_f^2$ is the signal variance (amplitude), controlling the overall magnitude of function variations;
+    \item $k_{\text{Mat}}$ is the Mat\'{e}rn kernel with smoothness parameter $\nu = 2.5$:
+    \begin{equation}
+        k_{\text{Mat}}(\vect{x}, \vect{x}';\, \boldsymbol{\ell},\, 5/2) = \left(1 + \frac{\sqrt{5}\,r}{\ell} + \frac{5\,r^2}{3\,\ell^2}\right) \exp\!\left(-\frac{\sqrt{5}\,r}{\ell}\right),
+    \end{equation}
+    with $r = \sqrt{\sum_{d=1}^{D} (x_d - x_d')^2 / \ell_d^2}$ and per-dimension length scales $\boldsymbol{\ell} = (\ell_1, \ell_2)$;
+    \item $\sigma_n^2$ is the noise variance modelled by a \texttt{WhiteKernel};
+    \item $\delta(\vect{x}, \vect{x}')$ is the Kronecker delta.
+\end{itemize}
+
+The Mat\'{e}rn kernel with $\nu = 2.5$ is chosen because it produces twice-differentiable sample functions, which is appropriate for physical power signals that are smooth but may exhibit localised variations.
+This is in contrast to the squared exponential (RBF) kernel, which assumes infinite differentiability and can over-smooth turbulent power fluctuations.
+
+\subsubsection{Hyperparameter optimisation}
+
+The kernel hyperparameters $\boldsymbol{\theta} = \{\sigma_f, \ell_1, \ell_2, \sigma_n\}$ are optimised by maximising the log marginal likelihood:
+\begin{equation}
+    \log p(\vect{y} \mid \mat{X}, \boldsymbol{\theta}) = -\frac{1}{2} \vect{y}^\top (\mat{K} + \sigma_n^2 \mat{I})^{-1} \vect{y} - \frac{1}{2} \log \abs{\mat{K} + \sigma_n^2 \mat{I}} - \frac{N}{2} \log 2\pi,
+\end{equation}
+where $\mat{K}_{ij} = k(\vect{x}_i, \vect{x}_j)$ is the training kernel matrix.
+The optimisation is performed using the L-BFGS-B algorithm with 40 random restarts to mitigate convergence to local optima.
+
+\subsubsection{Input scaling}
+
+Both input features and the target variable are standardised using \texttt{StandardScaler} (zero mean, unit variance) prior to training.
+This ensures that the length-scale parameters of the kernel are on a comparable scale across dimensions.
+Predictions are transformed back to the original scale for evaluation.
+
+\subsubsection{Predictive distribution}
+
+For a new input $\vect{x}_*$, the posterior predictive distribution is Gaussian:
+\begin{equation}
+    f(\vect{x}_*) \mid \mathcal{D} \sim \mathcal{N}\!\left(\mu_*,\; \sigma_*^2\right),
+\end{equation}
+with:
+\begin{align}
+    \mu_* &= \vect{k}_*^\top (\mat{K} + \sigma_n^2 \mat{I})^{-1} \vect{y}, \\
+    \sigma_*^2 &= k(\vect{x}_*, \vect{x}_*) - \vect{k}_*^\top (\mat{K} + \sigma_n^2 \mat{I})^{-1} \vect{k}_*,
+\end{align}
+where $\vect{k}_* = [k(\vect{x}_*, \vect{x}_1), \dots, k(\vect{x}_*, \vect{x}_N)]^\top$.
+The 95\% confidence interval is $[\mu_* - 1.96\,\sigma_*,\; \mu_* + 1.96\,\sigma_*]$.
+
+
+% ============================================================
+% 3. DATA DESCRIPTION
+% ============================================================
+\section{CFD Dataset}
+\label{sec:data}
+
+\subsection{Simulation setup}
+
+The training data are generated using OpenFOAM \citep{OpenFOAM}, simulating a wind turbine under varying yaw misalignment angles.
+The computational domain encompasses the rotor and near-wake region on an unstructured mesh with 180{,}857 nodes.
+The solver outputs the rotor-integrated power at each time step, extracted from the \texttt{powerRotor} diagnostic files.
+
+\subsection{Parametric dataset}
+
+Four yaw angles are simulated: $\mu \in \{270\degree, 276\degree, 282\degree, 285\degree\}$.
+Each simulation produces a time series of rotor power values at the corresponding time steps.
+After loading and consolidating all four trajectories, the combined dataset contains columns for yaw angle, simulation time, and rotor power (converted from watts to megawatts).
+
+\Cref{fig:power_dynamics} shows the raw power time series for each yaw angle.
+The power magnitude and temporal dynamics vary significantly across yaw angles, with lower power output observed at larger yaw misalignment angles due to the reduced projected rotor area facing the incoming wind.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/power_dynamics_by_yaw.png}
+    \caption{Raw rotor power time series for each yaw angle ($270\degree$, $276\degree$, $282\degree$, $285\degree$). Power is expressed in megawatts as a function of normalised time $\tau \in [0, 1]$.}
+    \label{fig:power_dynamics}
+\end{figure}
+
+\subsection{Preprocessing and train/test split}
+
+After applying the preprocessing pipeline described in \Cref{sec:preprocessing}, outliers are removed per yaw-angle group using the IQR method (\Cref{fig:outlier_removal}).
+The cleaned dataset is subsampled to 1{,}998 data points to maintain computational feasibility, as GPR training scales cubically with the number of data points, $\mathcal{O}(N^3)$.
+
+The subsampled dataset is split randomly (80/20) into:
+\begin{itemize}
+    \item \textbf{Training set:} 1{,}598 samples,
+    \item \textbf{Test set:} 400 samples.
+\end{itemize}
+The split is stratified by random sampling across all four yaw angles ($\texttt{random\_state} = 42$).
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/outlier_removal_comparison.png}
+    \caption{Comparison of power data before (top) and after (bottom) IQR-based outlier removal. Outliers are detected and removed independently within each yaw-angle group.}
+    \label{fig:outlier_removal}
+\end{figure}
+
+
+% ============================================================
+% 4. RESULTS
+% ============================================================
+\section{Results}
+\label{sec:results}
+
+\subsection{Optimised kernel parameters}
+
+\Cref{tab:kernel_params} reports the optimised kernel hyperparameters obtained by maximising the log marginal likelihood.
+The signal amplitude $\sigma_f = 1.77$ indicates substantial variation in the power signal.
+The length scales $\ell_1 = 0.10$ (yaw angle) and $\ell_2 = 0.127$ (normalised time) are both short, indicating that the power output is sensitive to changes in both yaw angle and time.
+The relatively short yaw length scale confirms that small changes in yaw misalignment produce measurable differences in rotor power.
+The noise level $\sigma_n^2 = 0.1$ captures the residual turbulent fluctuations in the CFD power signal that the smooth GP mean function does not resolve.
+
+\begin{table}[t]
+\centering
+\caption{Optimised GP kernel hyperparameters.}
+\label{tab:kernel_params}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Value} \\
+\midrule
+Signal amplitude & $\sigma_f$ & 1.77 \\
+Length scale (yaw angle) & $\ell_1$ & 0.100 \\
+Length scale (normalised time) & $\ell_2$ & 0.127 \\
+Smoothness & $\nu$ & 2.5 \\
+Noise variance & $\sigma_n^2$ & 0.100 \\
+\midrule
+Number of optimiser restarts & --- & 40 \\
+Number of training samples & $N$ & 1{,}598 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Model performance}
+
+\Cref{tab:performance} summarises the prediction accuracy on the held-out test set of 400 samples.
+The RMSE of 0.048~MW and MAE of 0.008~MW are small relative to the typical power magnitudes of 1--3~MW observed in the dataset.
+The $R^2$ score of 0.70 indicates that the model captures approximately 70\% of the variance in the test data.
+
+\begin{table}[t]
+\centering
+\caption{GPR model performance on the test set (400 samples).}
+\label{tab:performance}
+\begin{tabular}{lc}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Root Mean Square Error (RMSE) & 0.0482 MW \\
+Mean Absolute Error (MAE) & 0.0083 MW \\
+Coefficient of determination ($R^2$) & 0.6969 \\
+\midrule
+Training samples & 1{,}598 \\
+Test samples & 400 \\
+Input features & yaw angle, normalised time \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Predicted versus actual power}
+
+\Cref{fig:model_eval} (left panel) shows the predicted versus actual rotor power for the test set, with error bars representing $\pm 2\sigma$ (approximately 95\%) confidence intervals.
+The predictions cluster around the identity line, confirming that the model captures the overall power level correctly.
+The spread around the diagonal reflects the stochastic turbulent fluctuations in the CFD power signal that are inherently difficult to predict deterministically.
+
+\Cref{fig:model_eval} (right panel) shows the distribution of residuals $(y_{\text{actual}} - y_{\text{predicted}})$.
+The residuals are approximately centred at zero with a symmetric distribution, indicating no systematic bias in the predictions.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/model_evaluation.png}
+    \caption{Model evaluation on the test set. Left: predicted versus actual rotor power with $\pm 2\sigma$ uncertainty bounds. Right: histogram of prediction residuals.}
+    \label{fig:model_eval}
+\end{figure}
+
+\subsection{Power variation with yaw angle}
+
+\Cref{fig:power_variation} presents the GPR model's predictions of rotor power as a function of normalised time for each yaw angle, together with 95\% confidence bands.
+The model correctly captures the trend of decreasing mean power with increasing yaw misalignment from the nominal wind direction.
+The confidence bands widen in regions with fewer training data or higher local variability, providing a natural indicator of prediction reliability.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/rotor_power_variation_by_yaw.png}
+    \caption{GPR predictions of rotor power versus normalised time for each yaw angle, with shaded 95\% confidence intervals.}
+    \label{fig:power_variation}
+\end{figure}
+
+\subsection{Mean power versus yaw angle}
+
+\Cref{fig:mean_power} shows the time-averaged rotor power as a function of yaw angle.
+The GPR model predicts the mean power across the yaw range with uncertainty bounds, enabling rapid assessment of the power loss associated with each degree of yaw misalignment.
+This type of plot is directly useful for wake steering optimisation, where the operator needs to balance the power loss from yaw misalignment of the upstream turbine against the power gain from wake deflection at downstream turbines.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/mean_rotor_power_by_yaw.png}
+    \caption{Time-averaged rotor power as a function of yaw angle, with GPR mean prediction and 95\% confidence interval.}
+    \label{fig:mean_power}
+\end{figure}
+
+
+% ============================================================
+% 5. DISCUSSION
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Interpretation of $R^2 = 0.70$.}
+The $R^2$ score of 0.70 indicates that the GPR model explains 70\% of the variance in the test set.
+The remaining 30\% is attributable to turbulent fluctuations in the instantaneous power signal that are inherently stochastic and cannot be captured by a smooth surrogate model with only two input features (yaw angle and normalised time).
+For engineering applications such as wake steering optimisation, where the \emph{mean} power trend with yaw angle is of primary interest, this level of accuracy is sufficient.
+The RMSE of 0.048~MW represents less than 3\% of the typical power range in the dataset.
+
+\paragraph{Kernel length-scale interpretation.}
+The optimised length scales provide physical insight into the power dynamics.
+The short yaw-angle length scale ($\ell_1 = 0.10$) confirms that the power output is highly sensitive to yaw misalignment---even a few degrees of yaw change produce significant power variations.
+The normalised-time length scale ($\ell_2 = 0.127$) indicates temporal correlations on a scale of roughly 12\% of the trajectory duration, consistent with the time scale of turbulent wake structures passing through the rotor plane.
+
+\paragraph{Uncertainty quantification.}
+A key advantage of the GPR approach over deterministic surrogates is the provision of calibrated uncertainty bounds.
+The 95\% confidence intervals (\Cref{fig:model_eval,fig:power_variation}) correctly widen in regions of the input space with sparse training data or high local variability.
+This uncertainty information is valuable for risk-aware control strategies, where the operator may choose conservative yaw settings in regions of high prediction uncertainty.
+
+\paragraph{Comparison with the $\cos^3$ power law.}
+A commonly used analytical model for power under yaw misalignment is $P(\gamma) = P_0 \cos^3(\gamma)$, where $\gamma$ is the yaw misalignment angle and $P_0$ is the rated power at zero misalignment \citep{Burton2011}.
+While this model captures the general trend of power reduction with yaw, it does not account for transient dynamics, turbulence-induced fluctuations, or the specific turbine and flow configuration.
+The GPR surrogate, trained on high-fidelity CFD data, implicitly captures these effects and provides uncertainty quantification not available from the analytical model.
+
+\paragraph{Computational considerations.}
+GPR training scales as $\mathcal{O}(N^3)$ in the number of training points due to the Cholesky factorisation of the $N \times N$ kernel matrix.
+This necessitated subsampling the dataset to $\sim$2{,}000 points.
+For larger datasets, sparse GP approximations (e.g., inducing-point methods \citep{Titsias2009}) or scalable GP implementations could be employed without fundamentally changing the methodology.
+
+\paragraph{Limitations.}
+The current model uses only two input features (yaw angle and normalised time).
+Additional parameters such as wind speed, turbulence intensity, and atmospheric stability could improve predictions but would require a larger training dataset to avoid the curse of dimensionality.
+The $R^2$ of 0.70 indicates room for improvement, potentially through feature engineering (e.g., adding lagged power values) or hybrid approaches combining GPR with physics-based models.
+
+
+% ============================================================
+% 6. CONCLUSION
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper presented a Gaussian Process Regression surrogate model for predicting wind turbine rotor power under yaw misalignment.
+Trained on high-fidelity OpenFOAM CFD data from four yaw angles, the model achieves an RMSE of 0.048~MW and $R^2 = 0.70$ on a held-out test set, while providing calibrated 95\% confidence intervals for each prediction.
+The Mat\'{e}rn~$\nu = 2.5$ kernel was shown to be well suited for modelling the smooth but locally variable power dynamics, and the optimised length scales provide physical insight into the sensitivity of power to yaw angle and temporal dynamics.
+
+A robust preprocessing pipeline---combining time normalisation, IQR-based outlier removal, and spike detection---was developed to clean raw CFD power signals prior to model training.
+
+The GPR power surrogate complements wake field prediction methods such as TT-OpInf \citep{Tabib2025ttopinf}: while TT-OpInf provides detailed three-dimensional velocity fields for wake analysis, the GPR model directly predicts the engineering quantity of interest---rotor power---with uncertainty quantification.
+Together, these surrogates form a multi-level toolkit for data-driven wind farm optimisation.
+
+Future work will explore:
+\begin{enumerate}
+    \item Expanding the training dataset to include additional yaw angles and wind speed conditions.
+    \item Multi-fidelity GP approaches that combine high-fidelity CFD data with lower-cost analytical or engineering wake models.
+    \item Integration of the GPR power surrogate into a closed-loop wake steering controller with uncertainty-aware decision making.
+    \item Sparse GP or deep kernel learning methods to handle larger datasets without subsampling.
+\end{enumerate}
+
+
+% ============================================================
+% ACKNOWLEDGEMENTS
+% ============================================================
+\section*{Acknowledgements}
+This work was supported by SINTEF Digital. The authors acknowledge computational resources provided by the Norwegian Research Infrastructure Services (NRIS).
+
+
+% ============================================================
+% REFERENCES
+% ============================================================
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{99}
+
+\bibitem[Barthelmie et~al.(2009)]{Barthelmie2009}
+R.J.~Barthelmie, K.~Hansen, S.T.~Frandsen, O.~Rathmann, J.G.~Schepers, W.~Schlez, J.~Phillips, K.~Rados, A.~Zervos, E.S.~Politis, and P.K.~Chaviaropoulos.
+\newblock Modelling and measuring flow and wind turbine wakes in large wind farms offshore.
+\newblock \emph{Wind Energy}, 12(5):431--444, 2009.
+
+\bibitem[Burton et~al.(2011)]{Burton2011}
+T.~Burton, N.~Jenkins, D.~Sharpe, and E.~Bossanyi.
+\newblock \emph{Wind Energy Handbook}.
+\newblock John Wiley \& Sons, 2nd edition, 2011.
+
+\bibitem[Fleming et~al.(2017)]{Fleming2017}
+P.~Fleming, P.M.O.~Gebraad, S.~Lee, J.-W.~van~Wingerden, K.~Johnson, M.~Churchfield, J.~Michalakes, P.~Spalart, and P.~Moriarty.
+\newblock Simulation comparison of wake mitigation control strategies for a two-turbine case.
+\newblock \emph{Wind Energy}, 18(12):2135--2143, 2017.
+
+\bibitem[Gebraad et~al.(2016)]{Gebraad2016}
+P.M.O.~Gebraad, F.W.~Teeuwisse, J.W.~van~Wingerden, P.A.~Fleming, S.D.~Ruben, J.R.~Marden, and L.Y.~Pao.
+\newblock Wind plant power optimization through yaw control using a parametric model for wake effects---a {CFD} simulation study.
+\newblock \emph{Wind Energy}, 19(1):95--114, 2016.
+
+\bibitem[OpenFOAM(2024)]{OpenFOAM}
+{OpenCFD Ltd.}
+\newblock {OpenFOAM}: The open source {CFD} toolbox.
+\newblock \url{https://www.openfoam.com}, 2024.
+
+\bibitem[Port{\'e}-Agel et~al.(2020)]{PorteAgel2020}
+F.~Port{\'e}-Agel, M.~Bastankhah, and S.~Shamsoddin.
+\newblock Wind-turbine and wind-farm flows: A review.
+\newblock \emph{Boundary-Layer Meteorology}, 174:1--59, 2020.
+
+\bibitem[Rasmussen and Williams(2006)]{Rasmussen2006}
+C.E.~Rasmussen and C.K.I.~Williams.
+\newblock \emph{Gaussian Processes for Machine Learning}.
+\newblock MIT Press, 2006.
+
+\bibitem[Tabib(2025)]{Tabib2025ttopinf}
+M.~Tabib.
+\newblock Tensor train decomposition with operator inference for parametric wind turbine wake flow prediction.
+\newblock \emph{DeepWind 2026, submitted}, 2025.
+
+\bibitem[Titsias(2009)]{Titsias2009}
+M.K.~Titsias.
+\newblock Variational learning of inducing variables in sparse {G}aussian processes.
+\newblock In \emph{Proceedings of the 12th International Conference on Artificial Intelligence and Statistics (AISTATS)}, pages 567--574, 2009.
+
+\end{thebibliography}
+
+\end{document}

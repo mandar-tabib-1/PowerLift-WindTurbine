@@ -65,13 +65,13 @@ class WakeFlowAgent:
             grid_path: Path to VTK grid file for mesh structure
             default_output_dir: Default directory for VTK output
         """
-        # Set default paths relative to project root
+        # Set default paths relative to script directory (PowerLift)
         if model_dir is None:
-            model_dir = str(PROJECT_ROOT / "ResultMLYaw" / "tt_opinf_model")
+            model_dir = str(SCRIPT_DIR / "models" / "tt_opinf_model")
         if grid_path is None:
-            grid_path = str(PROJECT_ROOT / "ResultMLYaw" / "Grid_data.vtk")
+            grid_path = str(SCRIPT_DIR / "data" / "Grid_data.vtk")
         if default_output_dir is None:
-            default_output_dir = str(PROJECT_ROOT / "ResultMLYaw" / "agent_predictions")
+            default_output_dir = str(SCRIPT_DIR / "agent_predictions")
             
         self.model_dir = model_dir
         self.grid_path = grid_path

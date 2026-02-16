@@ -351,7 +351,7 @@ if 'last_searched_farm' not in st.session_state:
 if 'show_turbine_map' not in st.session_state:
     st.session_state.show_turbine_map = False
 if 'app_mode' not in st.session_state:
-    st.session_state.app_mode = 'Wind Farm Analysis'
+    st.session_state.app_mode = 'Predictive Maintenance'
 if 'pdm_results' not in st.session_state:
     st.session_state.pdm_results = None
 if 'pdm_models' not in st.session_state:
@@ -6031,7 +6031,12 @@ def main():
     </ul>
     </div>
     """, unsafe_allow_html=True)
-   
+    st.info(
+                "**Important Notes:**\n\n"
+                "1. **NTNU VPN Required:** To use the LLM model at NTNU, you must be connected to the NTNU VPN.\n\n"
+                "2. **Alternative Providers:** You can also try LLM with OpenAI or Anthropic using your own API key.\n\n"
+                "3. **API Key Privacy:** Your API keys should be stored in your local `.env` file and never shared."
+            )
     st.markdown("""
     <div class="info-box">          
      <b> Select a wind farm on the left sidebar for agents to start analysis!</b>
@@ -6046,8 +6051,8 @@ def main():
         st.header("🎯 Application Mode")
         app_mode = st.radio(
             "Select analysis mode:",
-            options=["Wind Farm Analysis", "Predictive Maintenance"],
-            index=0 if st.session_state.app_mode == "Wind Farm Analysis" else 1,
+            options=[ "Predictive Maintenance","Wind Farm Analysis"],
+            index=0 if st.session_state.app_mode == "Predictive Maintenance" else 1,
             help="Choose between multi-agent wind farm analysis or predictive maintenance inference"
         )
         
@@ -6269,6 +6274,7 @@ def main():
                                 """)
             else:
                 st.info("💡 Click 'Test Connection' to verify your LLM configuration before running analysis.")
+
             
             st.markdown("---")
             
@@ -7191,7 +7197,7 @@ def main():
                         from wake_animation import create_wake_contour_animation
                         
                         demo_anim_path = os.path.join(SCRIPT_DIR, f"wake_demo_yaw_{st.session_state.get('demo_yaw', 0):.0f}.gif")
-                        grid_path = str(PROJECT_ROOT / "ResultMLYaw" / "Grid_data.vtk")
+                        grid_path = str(SCRIPT_DIR / "data" / "Grid_data.vtk")
                         
                         create_wake_contour_animation(
                             predictions=wake_predictions,
@@ -8737,7 +8743,7 @@ The downstream turbine stays aligned at 0° to capture maximum power outside the
                         from wake_animation import create_wake_contour_animation
                         
                         anim_path = os.path.join(SCRIPT_DIR, "wake_animation_optimal.gif")
-                        grid_path = str(PROJECT_ROOT / "ResultMLYaw" / "Grid_data.vtk")
+                        grid_path = str(SCRIPT_DIR / "data" / "Grid_data.vtk")
                         
                         create_wake_contour_animation(
                             predictions=predictions,

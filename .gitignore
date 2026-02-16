@@ -52,3 +52,6 @@ wake_vtk_output/
 # OS
 .DS_Store
 Thumbs.db
+
+# Archive folder - internal documentation not for GitHub
+archive/

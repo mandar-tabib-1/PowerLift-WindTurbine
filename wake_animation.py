@@ -51,7 +51,7 @@ except ImportError:
 SCRIPT_DIR = Path(__file__).parent.resolve()
 RESULT_ML_YAW = SCRIPT_DIR.parent
 PROJECT_ROOT = RESULT_ML_YAW.parent
-DEFAULT_GRID_PATH = str(PROJECT_ROOT / "ResultMLYaw" / "Grid_data.vtk")
+DEFAULT_GRID_PATH = str(SCRIPT_DIR / "data" / "Grid_data.vtk")
 
 
 def create_wake_animation_3d(

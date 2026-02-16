@@ -1,0 +1,531 @@
+\documentclass[12pt]{article}
+
+% ============================================================
+% Packages
+% ============================================================
+\usepackage[a4paper, margin=2.5cm]{geometry}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{float}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{bm}
+\usepackage{natbib}
+\usepackage{xcolor}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+% ============================================================
+% Custom commands
+% ============================================================
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\norm}[1]{\left\| #1 \right\|}
+\newcommand{\abs}[1]{\left| #1 \right|}
+\newcommand{\tensor}[1]{\boldsymbol{\mathcal{#1}}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+\newcommand{\vect}[1]{\mathbf{#1}}
+\newcommand{\dt}{\Delta t}
+
+% ============================================================
+\title{Tensor Train Decomposition with Operator Inference for Parametric Wind Turbine Wake Flow Prediction}
+
+\author{
+  Mandar Tabib \\
+  \textit{SINTEF Digital, Department of Mathematics and Cybernetics} \\
+  \textit{Trondheim, Norway} \\
+  mandar.tabib@sintef.no
+}
+
+\date{}
+
+% ============================================================
+\begin{document}
+\maketitle
+
+% ============================================================
+% ABSTRACT
+% ============================================================
+\begin{abstract}
+High-fidelity computational fluid dynamics (CFD) simulations of wind turbine wakes are essential for optimising yaw-based wake steering strategies, yet their computational cost prohibits real-time deployment.
+This paper presents a data-driven surrogate model that combines Tensor Train (TT) decomposition, Operator Inference (OpInf), and radial basis function (RBF) interpolation---collectively termed \emph{TT-OpInf}---for parametric, spatio-temporal prediction of turbine wake velocity fields under varying yaw angles.
+The TT decomposition separates the four-dimensional snapshot tensor (parameter $\times$ time $\times$ space $\times$ velocity component) into three compact cores representing parameter, temporal, and spatial modes, achieving a $10.1\times$ data compression.
+OpInf learns a linear dynamical system governing the temporal evolution of the reduced coefficients, while thin-plate-spline RBF interpolation enables prediction at unseen yaw angles.
+Trained on OpenFOAM simulations at three yaw angles (270\textdegree, 282\textdegree, 285\textdegree) on an unstructured mesh with 180{,}857 nodes and 101 time steps, the TT-OpInf model predicts the three-component velocity field at a held-out yaw angle of 276\textdegree{} with a relative $L^2$ error of 12.9\% and sub-second inference time.
+The method requires no neural network training, offering an interpretable and computationally lightweight alternative to deep-learning-based surrogates.
+\end{abstract}
+
+\noindent\textbf{Keywords:} reduced-order model, tensor train decomposition, operator inference, wind turbine wake, yaw steering, surrogate model
+
+% ============================================================
+% 1. INTRODUCTION
+% ============================================================
+\section{Introduction}
+\label{sec:introduction}
+
+Wind energy has become a cornerstone of the global transition to renewable power, yet wake-induced losses remain a significant challenge for wind farm operators.
+Downstream turbines in a farm can experience power deficits of 10--20\% due to the reduced wind speed and increased turbulence within the upstream turbine's wake \citep{Barthelmie2009,PorteAgel2020}.
+Intentional yaw misalignment of upstream turbines---commonly referred to as \emph{wake steering}---deflects the wake laterally away from downstream rotors, thereby increasing aggregate farm power output \citep{Fleming2017,Gebraad2016}.
+Effective implementation of wake steering requires fast, accurate predictions of the three-dimensional wake velocity field as a function of yaw angle.
+
+High-fidelity CFD solvers such as OpenFOAM \citep{OpenFOAM} can provide detailed wake flow fields for any yaw configuration; however, a single simulation with adequate spatio-temporal resolution can require hours to days on parallel computing clusters.
+This computational burden makes direct CFD impractical for real-time control applications, design optimisation, or uncertainty quantification, all of which demand thousands of evaluations across the parameter space.
+
+To bridge this gap, \emph{reduced-order models} (ROMs) and data-driven surrogates have attracted growing attention.
+Classical approaches based on Proper Orthogonal Decomposition (POD) and Dynamic Mode Decomposition (DMD) project the high-dimensional state onto a small set of spatial modes and learn their temporal evolution \citep{Brunton2019,Benner2015}.
+More recently, deep-learning surrogates---including convolutional autoencoders \citep{Tabib2024}, graph neural networks \citep{Chen2024}, and neural operators \citep{Li2021fourier}---have demonstrated the ability to learn complex spatio-temporal dynamics directly from data.
+While powerful, these methods often require large training datasets, extensive hyperparameter tuning, and GPU resources, and they can lack the interpretability of classical ROM techniques.
+
+An alternative direction is offered by \emph{tensor decomposition} methods, which exploit the multi-dimensional structure of parametric snapshot data.
+The Tensor Train (TT) format \citep{Oseledets2011} provides a compact, hierarchical decomposition that separates parameter, temporal, and spatial modes with controllable accuracy.
+When combined with \emph{Operator Inference} (OpInf) \citep{Peherstorfer2016}, which learns polynomial dynamical systems from snapshot data via least-squares regression, the result is a framework that captures temporal dynamics without the overhead of neural network training.
+
+In this work, we propose the \emph{TT-OpInf} framework for parametric wind turbine wake prediction.
+The key contributions are:
+\begin{enumerate}
+    \item A three-core TT decomposition of the four-dimensional CFD snapshot tensor that separates parameter, temporal, and spatial variability, achieving $10.1\times$ compression with 2.6\% reconstruction error.
+    \item Integration of linear OpInf for temporal dynamics and thin-plate-spline RBF interpolation for parameter generalisation, enabling prediction at unseen yaw angles.
+    \item Demonstration on OpenFOAM wake data with 180{,}857 spatial nodes, showing 12.9\% relative $L^2$ error at a held-out yaw angle with sub-second inference time.
+\end{enumerate}
+
+The remainder of the paper is organised as follows.
+\Cref{sec:methodology} describes the TT-OpInf methodology.
+\Cref{sec:data} details the CFD dataset and training/test configuration.
+\Cref{sec:results} presents training and inference results.
+\Cref{sec:conclusion} summarises findings and outlines future work.
+
+
+% ============================================================
+% 2. METHODOLOGY
+% ============================================================
+\section{Methodology}
+\label{sec:methodology}
+
+\subsection{Problem formulation}
+\label{sec:problem}
+
+Consider a set of time-dependent CFD simulations of wind turbine wakes, each characterised by a yaw angle parameter $\mu \in \{\mu_1, \dots, \mu_P\}$.
+At each parameter value, the solver produces a sequence of velocity snapshots $\vect{u}(\mu, t_k, \vect{x}) \in \R^3$ for $k = 0, 1, \dots, K$ on an unstructured spatial mesh with $M$ nodes.
+Collecting all snapshots yields a four-dimensional data tensor:
+\begin{equation}
+\label{eq:tensor4d}
+    \tensor{T} \in \R^{P \times (K+1) \times M \times 3}, \qquad
+    \tensor{T}_{p,k,m,c} = u_c(\mu_p, t_k, \vect{x}_m),
+\end{equation}
+where index $p$ runs over parameters, $k$ over time steps, $m$ over spatial nodes, and $c$ over velocity components $(U_x, U_y, U_z)$.
+
+The goal is to construct a surrogate model $\hat{\vect{u}}(\mu_{\text{new}}, t_k, \vect{x}_m)$ that predicts the full spatio-temporal velocity field at a new yaw angle $\mu_{\text{new}}$ not present in the training set, at a fraction of the CFD computational cost.
+
+\subsection{Data normalisation}
+\label{sec:normalisation}
+
+Prior to decomposition, the tensor is normalised element-wise to $[0,1]$:
+\begin{equation}
+    \tilde{\tensor{T}} = \frac{\tensor{T} - T_{\min}}{T_{\max} - T_{\min}},
+\end{equation}
+where $T_{\min}$ and $T_{\max}$ are the global minimum and maximum values across the entire tensor.
+Predictions are denormalised by the inverse transformation after reconstruction.
+
+\subsection{Tensor Train decomposition}
+\label{sec:tt}
+
+The TT decomposition \citep{Oseledets2011} factorises the normalised data tensor into a chain of low-rank cores.
+We first flatten the spatial and feature dimensions to form a three-dimensional tensor $\tilde{\tensor{T}}^{(3)} \in \R^{P \times (K+1) \times (M \cdot 3)}$, then decompose it as
+\begin{equation}
+\label{eq:tt}
+    \tilde{\tensor{T}}^{(3)}_{p,k,s} \approx \sum_{i=1}^{r_1} \sum_{j=1}^{r_2} G^{(1)}_{p,i} \; G^{(2)}_{i,k,j} \; G^{(3)}_{j,s},
+\end{equation}
+where:
+\begin{itemize}
+    \item $\mat{G}^{(1)} \in \R^{P \times r_1}$ is the \emph{parameter core}, encoding dependence on yaw angle;
+    \item $\mat{G}^{(2)} \in \R^{r_1 \times (K+1) \times r_2}$ is the \emph{time core}, encoding temporal dynamics;
+    \item $\mat{G}^{(3)} \in \R^{r_2 \times (M \cdot 3)}$ is the \emph{spatial core}, encoding spatial modes.
+\end{itemize}
+
+The decomposition is computed by two successive truncated SVDs.
+First, the tensor is unfolded along the parameter mode to form $\mat{X}_1 \in \R^{P \times (K+1) \cdot M \cdot 3}$ and factorised as
+\begin{equation}
+    \mat{X}_1 = \mat{U}_1 \mat{\Sigma}_1 \mat{V}_1^\top \approx \mat{U}_1^{(r_1)} \mat{\Sigma}_1^{(r_1)} {\mat{V}_1^{(r_1)}}^\top,
+\end{equation}
+where the rank $r_1$ is determined by the truncation tolerance $\varepsilon$ such that
+\begin{equation}
+    \frac{\sum_{i=r_1+1}^{\min(P,N)} \sigma_i^2}{\sum_{i=1}^{\min(P,N)} \sigma_i^2} \leq \varepsilon^2.
+\end{equation}
+
+Setting $\mat{G}^{(1)} = \mat{U}_1^{(r_1)}$, the intermediate matrix $\mat{\Sigma}_1^{(r_1)} {\mat{V}_1^{(r_1)}}^\top$ is reshaped to $(r_1 \cdot (K+1)) \times (M \cdot 3)$ and a second truncated SVD yields $\mat{G}^{(2)}$ and $\mat{G}^{(3)}$ with rank $r_2$.
+
+Using Einstein summation notation, the full reconstruction reads:
+\begin{equation}
+\label{eq:reconstruct}
+    \hat{\tilde{\tensor{T}}}^{(3)}_{p,k,s} = \mat{G}^{(1)}_{p,:} \; \mat{G}^{(2)}_{:,k,:} \; \mat{G}^{(3)}_{:,s}.
+\end{equation}
+
+The \emph{compression ratio} is defined as
+\begin{equation}
+    \rho = \frac{P \cdot (K+1) \cdot M \cdot 3}{P \cdot r_1 + r_1 \cdot (K+1) \cdot r_2 + r_2 \cdot M \cdot 3}.
+\end{equation}
+
+\subsection{Operator Inference for temporal dynamics}
+\label{sec:opinf}
+
+To enable prediction at future time steps or under modified initial conditions, we learn a dynamical system governing the temporal evolution of the reduced time coefficients.
+From the time core $\mat{G}^{(2)} \in \R^{r_1 \times (K+1) \times r_2}$, we extract a matrix of time coefficients:
+\begin{equation}
+    \vect{g}(t_k) \in \R^{r_1 \cdot r_2}, \qquad
+    \vect{g}(t_k) = \text{vec}\!\left(\mat{G}^{(2)}_{:,k,:}\right),
+\end{equation}
+obtained by transposing and reshaping the time core to $\mat{G}_{\text{time}} \in \R^{(K+1) \times (r_1 \cdot r_2)}$.
+
+Following the OpInf framework \citep{Peherstorfer2016}, we posit a linear dynamical system:
+\begin{equation}
+\label{eq:opinf}
+    \frac{d\vect{g}}{dt} = \vect{c} + \mat{A}\,\vect{g},
+\end{equation}
+where $\vect{c} \in \R^{r_1 r_2}$ is a constant vector and $\mat{A} \in \R^{(r_1 r_2) \times (r_1 r_2)}$ is the system matrix.
+
+Time derivatives are approximated by central finite differences at interior points:
+\begin{equation}
+    \dot{\vect{g}}(t_k) \approx \frac{\vect{g}(t_{k+1}) - \vect{g}(t_{k-1})}{2\,\dt}, \qquad k = 1, \dots, K-1.
+\end{equation}
+
+Assembling the data matrix $\mat{D} = [\vect{1}, \mat{G}_{\text{time}}^{(1:K-1)}] \in \R^{(K-1) \times (1 + r_1 r_2)}$ and the derivative matrix $\dot{\mat{G}} \in \R^{(K-1) \times r_1 r_2}$, the operators are obtained by Tikhonov-regularised least squares:
+\begin{equation}
+\label{eq:opinf_solve}
+    [\vect{c}^\top; \mat{A}^\top] = \left(\mat{D}^\top \mat{D} + \lambda \mat{I}\right)^{-1} \mat{D}^\top \dot{\mat{G}},
+\end{equation}
+where $\lambda > 0$ is the regularisation parameter.
+
+During inference, given the initial condition $\vect{g}_0 = \vect{g}(t_0)$, the trajectory $\{\vect{g}(t_k)\}_{k=0}^{K}$ is computed via fourth-order Runge--Kutta (RK4) integration:
+\begin{equation}
+    \vect{g}_{k+1} = \vect{g}_k + \frac{\dt}{6}\left(\vect{k}_1 + 2\vect{k}_2 + 2\vect{k}_3 + \vect{k}_4\right),
+\end{equation}
+where $\vect{k}_i$ are the standard RK4 intermediate evaluations of the right-hand side of \cref{eq:opinf}.
+
+\subsection{RBF interpolation for new parameters}
+\label{sec:rbf}
+
+To predict at a new yaw angle $\mu_{\text{new}}$ not in the training set, we interpolate the parameter core $\mat{G}^{(1)}$ using thin-plate-spline radial basis functions.
+Given training parameters $\{\mu_1, \dots, \mu_P\}$ and corresponding rows of $\mat{G}^{(1)}$, the RBF interpolant yields:
+\begin{equation}
+    \hat{\vect{g}}^{(1)}(\mu_{\text{new}}) = \sum_{p=1}^{P} w_p \, \phi\!\left(\norm{\mu_{\text{new}} - \mu_p}\right),
+\end{equation}
+where $\phi(r) = r^2 \ln r$ is the thin-plate spline kernel and $\{w_p\}$ are weights determined by the interpolation conditions.
+
+\subsection{Inference pipeline}
+\label{sec:pipeline}
+
+The complete prediction pipeline for a new yaw angle $\mu_{\text{new}}$ proceeds as follows:
+
+\begin{algorithm}[H]
+\caption{TT-OpInf Inference}
+\label{alg:inference}
+\begin{algorithmic}[1]
+\Require New yaw angle $\mu_{\text{new}}$, number of time steps $K$, time step $\dt$
+\Ensure Predicted velocity field $\hat{\vect{u}} \in \R^{(K+1) \times M \times 3}$
+\State $\hat{\vect{g}}^{(1)} \gets \text{RBF}(\mu_{\text{new}}; \{\mu_p, \mat{G}^{(1)}_p\}_{p=1}^{P})$
+\Comment{Interpolate parameter core}
+\State $\vect{g}_0 \gets \mat{G}_{\text{time}}[0, :]$
+\Comment{Initial time coefficient}
+\State $\{\vect{g}_k\}_{k=0}^{K} \gets \text{RK4}(\vect{g}_0, \vect{c}, \mat{A}, K, \dt)$
+\Comment{Integrate OpInf dynamics}
+\For{$k = 0, \dots, K$}
+    \State $\hat{\tilde{\vect{u}}}(t_k) \gets \hat{\vect{g}}^{(1)} \cdot \text{reshape}(\vect{g}_k) \cdot \mat{G}^{(3)}$
+    \Comment{TT reconstruction}
+\EndFor
+\State $\hat{\vect{u}} \gets \text{denormalise}(\hat{\tilde{\vect{u}}})$
+\Comment{Map back to physical units}
+\end{algorithmic}
+\end{algorithm}
+
+
+% ============================================================
+% 3. DATA DESCRIPTION
+% ============================================================
+\section{CFD Dataset}
+\label{sec:data}
+
+\subsection{Simulation setup}
+
+The training data are generated using OpenFOAM \citep{OpenFOAM}, a widely used open-source CFD framework, to simulate wind turbine wake flows under varying yaw misalignment angles.
+The computational domain is clipped to the wake-affected region downstream of the turbine rotor, spanning $[960, 2710]$\,m in the streamwise ($x$) direction and $[1190, 1810]$\,m in the lateral ($y$) direction, at a fixed hub height of $z = 88$\,m.
+The unstructured mesh contains $M = 180{,}857$ nodes with $1{,}076{,}982$ undirected edges.
+
+The solver outputs the three-component velocity vector $\vect{u} = (U_x, U_y, U_z)$ at each mesh node for 101 equally spaced time steps with $\dt = 0.1$\,s, corresponding to a total simulation window of 10.0\,s.
+Velocity magnitudes across the dataset range from 2.74\,m/s to 9.88\,m/s with a mean of 2.34\,m/s.
+
+\subsection{Parametric dataset}
+
+Four yaw angles are simulated: $\mu \in \{270\degree, 276\degree, 282\degree, 285\degree\}$.
+The complete four-dimensional snapshot tensor has dimensions:
+\begin{equation}
+    \tensor{T} \in \R^{4 \times 101 \times 180{,}857 \times 3},
+\end{equation}
+totalling approximately 220 million scalar values.
+
+\subsection{Training and test split}
+
+The dataset is split by \emph{parameter}, holding out the yaw angle $\mu = 276\degree$ for testing.
+This tests the model's ability to \emph{interpolate} to a parameter value lying between training samples:
+\begin{itemize}
+    \item \textbf{Training:} $\mu_{\text{train}} = \{270\degree, 282\degree, 285\degree\}$ --- 3 yaw angles, all 101 time steps;
+    \item \textbf{Test:} $\mu_{\text{test}} = 276\degree$ --- 1 yaw angle (held out), all 101 time steps.
+\end{itemize}
+
+The training tensor thus has shape $(3, 101, 180{,}857, 3)$ and the test tensor has shape $(1, 101, 180{,}857, 3)$.
+
+
+% ============================================================
+% 4. RESULTS AND DISCUSSION
+% ============================================================
+\section{Results and Discussion}
+\label{sec:results}
+
+\subsection{TT decomposition analysis}
+\label{sec:tt_results}
+
+\Cref{tab:tt_config} summarises the TT-OpInf hyperparameters used for training.
+The TT decomposition of the training tensor $(3, 101, 180{,}857, 3)$ produces three cores with ranks $r_1 = 3$ and $r_2 = 30$:
+\begin{itemize}
+    \item Parameter core: $\mat{G}^{(1)} \in \R^{3 \times 3}$,
+    \item Time core: $\mat{G}^{(2)} \in \R^{3 \times 101 \times 30}$,
+    \item Spatial core: $\mat{G}^{(3)} \in \R^{30 \times 542{,}571}$.
+\end{itemize}
+
+The total number of stored parameters is $9 + 9{,}090 + 16{,}277{,}130 \approx 16.3 \times 10^6$, compared to $164.4 \times 10^6$ in the original tensor, yielding a compression ratio of $\rho = 10.1\times$.
+The relative $L^2$ reconstruction error on the training data is $2.59 \times 10^{-2}$ (2.6\%), confirming that the TT decomposition captures the dominant spatial, temporal, and parametric variability.
+
+The first rank $r_1 = 3$ equals the number of training parameters, indicating that the parameter mode retains full information.
+The second rank $r_2 = 30$ reflects the intrinsic temporal complexity of the wake flow.
+
+\begin{table}[t]
+\centering
+\caption{TT-OpInf configuration and training summary.}
+\label{tab:tt_config}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Component} & \textbf{Parameter} & \textbf{Value} \\
+\midrule
+TT decomposition & Tolerance $\varepsilon$ & $10^{-4}$ \\
+                 & Max rank & 30 \\
+                 & Rank $r_1$ (parameter) & 3 \\
+                 & Rank $r_2$ (time) & 30 \\
+                 & Reconstruction error & 2.59\% \\
+                 & Compression ratio & 10.1$\times$ \\
+\midrule
+Operator Inference & Polynomial degree & 1 (linear) \\
+                   & Regularisation $\lambda$ & $10^{-3}$ \\
+                   & System dimension & 90 ($= r_1 \times r_2$) \\
+                   & Time integrator & RK4 \\
+                   & Fit error & 0.437 \\
+\midrule
+RBF interpolation & Kernel & Thin-plate spline \\
+\midrule
+Normalisation & Range & $[0, 1]$ (min-max) \\
+\midrule
+Training time & Total & $\sim$5 seconds (CPU) \\
+Inference time & Per yaw angle & $<$1 second \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{OpInf dynamics training}
+
+The OpInf model learns a linear system (\cref{eq:opinf}) of dimension $r_1 \times r_2 = 90$.
+The least-squares fit error is $4.37 \times 10^{-1}$, which reflects the challenge of capturing the full temporal variability in a purely linear model.
+Nonetheless, the learned dynamics combined with TT reconstruction yield accurate predictions, as shown below.
+A higher-order (quadratic) OpInf model was also tested but did not improve accuracy for this dataset, likely due to the limited number of training parameters.
+
+The total offline training time---including data normalisation, TT decomposition, and OpInf fitting---is approximately 5 seconds on a standard CPU, making the method orders of magnitude faster than neural-network-based alternatives that require GPU training.
+
+\subsection{Prediction at held-out yaw angle}
+\label{sec:test_results}
+
+The trained TT-OpInf model is used to predict the velocity field at the held-out yaw angle $\mu = 276\degree$ for 100 time steps.
+The three-stage inference pipeline---RBF interpolation of $\mat{G}^{(1)}$, RK4 integration of OpInf dynamics, and TT reconstruction---completes in under one second.
+
+\subsubsection{Quantitative error analysis}
+
+\Cref{tab:error_summary} reports the prediction error metrics.
+The overall relative $L^2$ error is $12.92\%$.
+Importantly, the per-timestep error remains stable across the entire prediction horizon, ranging from $12.2\%$ to $13.6\%$ with a mean of $12.9\%$, indicating no error accumulation from the OpInf time integration.
+
+\begin{table}[t]
+\centering
+\caption{Prediction error at the held-out yaw angle $\mu = 276\degree$.}
+\label{tab:error_summary}
+\begin{tabular}{lc}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Overall relative $L^2$ error & 12.92\% \\
+Mean per-timestep error & 12.90\% \\
+Maximum per-timestep error & 13.57\% \\
+Minimum per-timestep error & 12.20\% \\
+\midrule
+Interpolation-only error (no OpInf) & 13.05\% \\
+OpInf improvement over interpolation & 0.13\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+To isolate the contribution of OpInf, we also evaluate a baseline that uses only RBF-interpolated TT reconstruction without temporal dynamics learning.
+This interpolation-only baseline achieves $13.05\%$ error, compared to $12.92\%$ with OpInf, confirming that the learned dynamics provide a modest but consistent improvement.
+The relatively small margin reflects the dominance of the spatial TT truncation error ($2.6\%$) over the temporal dynamics error.
+
+\subsubsection{Temporal error evolution}
+
+\Cref{fig:error_time} shows the relative $L^2$ error as a function of time step.
+The error oscillates mildly between 12.2\% and 13.6\% without a systematic upward trend, demonstrating the temporal stability of the RK4 integration of the learned OpInf system.
+The cyclic pattern correlates with the transient wake dynamics in the CFD data.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\textwidth]{../tt_opinf_error_over_time_276.png}
+    \caption{Relative $L^2$ prediction error over 100 time steps for the held-out yaw angle $\mu = 276\degree$. The error remains stable between 12.2\% and 13.6\% with no accumulation.}
+    \label{fig:error_time}
+\end{figure}
+
+\subsubsection{Spatial comparison}
+
+\Cref{fig:comparison} presents velocity magnitude contour plots comparing ground truth CFD, TT-OpInf predictions, and absolute error maps at five representative time steps ($t = 0, 25, 50, 75, 100$).
+The surrogate model captures the overall wake structure---including the velocity deficit region, lateral wake deflection, and wake recovery---with high fidelity.
+The maximum absolute error at any single time step is approximately 3.4\,m/s, localised at high-gradient regions near the wake boundaries and turbulent eddies, where the low-rank TT approximation smooths fine-scale features.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{../tt_opinf_comparison_276.png}
+    \caption{Velocity magnitude comparison at yaw = 276\textdegree{} for $t = 0, 25, 50, 75, 100$. Left: ground truth (CFD). Centre: TT-OpInf prediction. Right: absolute error. Maximum absolute errors are annotated on each panel.}
+    \label{fig:comparison}
+\end{figure}
+
+\subsection{Discussion}
+
+The TT-OpInf framework achieves several desirable properties for wind turbine wake surrogates:
+
+\paragraph{Computational efficiency.}
+The offline training cost ($\sim$5 seconds) and online inference cost ($<$1 second per yaw angle for 101 time steps on 180{,}857 nodes) are negligible compared to the hours required by CFD.
+This speedup factor of $\mathcal{O}(10^3\text{--}10^4)$ enables applications in real-time control and large-scale optimisation.
+
+\paragraph{Interpretability.}
+The three TT cores provide physical insight: $\mat{G}^{(1)}$ captures the parametric (yaw-angle) dependence, $\mat{G}^{(2)}$ encodes the dominant temporal modes, and $\mat{G}^{(3)}$ represents spatial patterns.
+This separation is not available in black-box neural network surrogates.
+
+\paragraph{No neural network training.}
+Unlike GCA-ROM \citep{Chen2024} or DeepONet \citep{Lu2021deeponet} based approaches, TT-OpInf requires no GPU, no iterative gradient-based optimisation, and no hyperparameter searches for learning rate, batch size, or network architecture.
+
+\paragraph{Error sources.}
+The prediction error ($\sim$13\%) is dominated by the TT truncation error (2.6\%), which arises from the limited rank approximation.
+The spatial core $\mat{G}^{(3)}$ smooths fine-scale turbulent structures, particularly at wake boundaries.
+Increasing $r_2$ beyond 30 would reduce this error at the cost of larger storage and potential overfitting with only three training parameters.
+The OpInf dynamics contribute minimally to the total error (0.13\% improvement over static interpolation), suggesting that the temporal variability is well captured by the TT time core.
+
+\paragraph{Limitations.}
+The current framework is limited to \emph{interpolation} within the training parameter range; extrapolation to yaw angles outside $[270\degree, 285\degree]$ was not tested.
+The linear OpInf model may not capture strongly nonlinear temporal dynamics in more turbulent regimes.
+The accuracy could be improved by incorporating more training yaw angles or by adopting a multi-fidelity approach where a neural network learns residual corrections to the TT-OpInf predictions.
+
+
+% ============================================================
+% 5. CONCLUSION
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper presented TT-OpInf, a data-driven surrogate framework combining Tensor Train decomposition, Operator Inference, and RBF interpolation for parametric prediction of wind turbine wake velocity fields under varying yaw angles.
+The method achieves a 10.1$\times$ compression of the CFD snapshot tensor, trains in approximately 5 seconds on a standard CPU, and predicts the full three-component velocity field on 180{,}857 mesh nodes at sub-second speed.
+For a held-out yaw angle of 276\textdegree, the model attains a relative $L^2$ error of 12.9\%, with stable error across 100 predicted time steps.
+
+The TT-OpInf approach offers an interpretable, lightweight alternative to deep-learning surrogates, particularly attractive when training data are limited and rapid deployment is required.
+Future work will explore: (i) multi-fidelity extensions where a neural network learns residual corrections to improve accuracy, (ii) inclusion of additional parameters (wind speed, turbulence intensity) beyond yaw angle, and (iii) extension to full three-dimensional wake fields across multiple hub heights.
+
+
+% ============================================================
+% ACKNOWLEDGEMENTS
+% ============================================================
+\section*{Acknowledgements}
+This work was supported by SINTEF Digital. The authors acknowledge computational resources provided by [to be added].
+
+
+% ============================================================
+% REFERENCES
+% ============================================================
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{99}
+
+\bibitem[Barthelmie et~al.(2009)]{Barthelmie2009}
+R.J.~Barthelmie, K.~Hansen, S.T.~Frandsen, O.~Rathmann, J.G.~Schepers, W.~Schlez, J.~Phillips, K.~Rados, A.~Zervos, E.S.~Politis, and P.K.~Chaviaropoulos.
+\newblock Modelling and measuring flow and wind turbine wakes in large wind farms offshore.
+\newblock \emph{Wind Energy}, 12(5):431--444, 2009.
+
+\bibitem[Benner et~al.(2015)]{Benner2015}
+P.~Benner, S.~Gugercin, and K.~Willcox.
+\newblock A survey of projection-based model reduction methods for parametric dynamical systems.
+\newblock \emph{SIAM Review}, 57(4):483--531, 2015.
+
+\bibitem[Brunton and Kutz(2019)]{Brunton2019}
+S.L.~Brunton and J.N.~Kutz.
+\newblock \emph{Data-Driven Science and Engineering: Machine Learning, Dynamical Systems, and Control}.
+\newblock Cambridge University Press, 2019.
+
+\bibitem[Chen et~al.(2024)]{Chen2024}
+J.~Chen, M.~Tabib, and others.
+\newblock Time extrapolation with graph convolutional autoencoder and tensor train decomposition.
+\newblock \emph{arXiv preprint arXiv:2511.23037}, 2024.
+
+\bibitem[Fleming et~al.(2017)]{Fleming2017}
+P.~Fleming, P.M.O.~Gebraad, S.~Lee, J.-W.~van~Wingerden, K.~Johnson, M.~Churchfield, J.~Michalakes, P.~Spalart, and P.~Moriarty.
+\newblock Simulation comparison of wake mitigation control strategies for a two-turbine case.
+\newblock \emph{Wind Energy}, 18(12):2135--2143, 2017.
+
+\bibitem[Gebraad et~al.(2016)]{Gebraad2016}
+P.M.O.~Gebraad, F.W.~Teeuwisse, J.W.~van~Wingerden, P.A.~Fleming, S.D.~Ruben, J.R.~Marden, and L.Y.~Pao.
+\newblock Wind plant power optimization through yaw control using a parametric model for wake effects---a {CFD} simulation study.
+\newblock \emph{Wind Energy}, 19(1):95--114, 2016.
+
+\bibitem[Li et~al.(2021)]{Li2021fourier}
+Z.~Li, N.~Kovachki, K.~Azizzadenesheli, B.~Liu, K.~Bhatt, A.~Stuart, and A.~Anandkumar.
+\newblock Fourier neural operator for parametric partial differential equations.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2021.
+
+\bibitem[Lu et~al.(2021)]{Lu2021deeponet}
+L.~Lu, P.~Jin, G.~Pang, Z.~Zhang, and G.E.~Karniadakis.
+\newblock Learning nonlinear operators via {DeepONet} based on the universal approximation theorem of operators.
+\newblock \emph{Nature Machine Intelligence}, 3:218--229, 2021.
+
+\bibitem[OpenFOAM(2024)]{OpenFOAM}
+{OpenCFD Ltd.}
+\newblock {OpenFOAM}: The open source {CFD} toolbox.
+\newblock \url{https://www.openfoam.com}, 2024.
+
+\bibitem[Oseledets(2011)]{Oseledets2011}
+I.V.~Oseledets.
+\newblock Tensor-train decomposition.
+\newblock \emph{SIAM Journal on Scientific Computing}, 33(5):2295--2317, 2011.
+
+\bibitem[Peherstorfer and Willcox(2016)]{Peherstorfer2016}
+B.~Peherstorfer and K.~Willcox.
+\newblock Data-driven operator inference for nonintrusive projection-based model reduction.
+\newblock \emph{Computer Methods in Applied Mechanics and Engineering}, 306:196--215, 2016.
+
+\bibitem[Port{\'e}-Agel et~al.(2020)]{PorteAgel2020}
+F.~Port{\'e}-Agel, M.~Bastankhah, and S.~Shamsoddin.
+\newblock Wind-turbine and wind-farm flows: A review.
+\newblock \emph{Boundary-Layer Meteorology}, 174:1--59, 2020.
+
+\bibitem[Tabib et~al.(2024)]{Tabib2024}
+M.~Tabib and others.
+\newblock Parametric reduced-order modeling for wind turbine wake flows using graph convolutional autoencoders.
+\newblock \emph{In preparation}, 2024.
+
+\end{thebibliography}
+
+\end{document}

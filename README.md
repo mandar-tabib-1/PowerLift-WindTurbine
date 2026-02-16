@@ -97,6 +97,17 @@ NTNU_API_BASE=https://llm.hpc.ntnu.no/v1
    - Go to your app's Settings > Secrets
    - Add the same key-value pairs from `.env`
 
+### Important Notes
+
+> **1. NTNU VPN Required**
+> To use the LLM model at NTNU, you must be connected to the NTNU VPN.
+>
+> **2. Alternative LLM Providers**
+> You can also use LLM with OpenAI or Anthropic using your own API key.
+>
+> **3. API Key Privacy**
+> Your API keys are stored in your local `.env` file and never shared.
+
 ### Run the Application
 
 ```bash
@@ -197,6 +208,31 @@ PowerLift/
 |       |-- test_data.npz
 |   |-- fuhrlander-master/      # Fuhrlander dataset and examples
 ```
+
+---
+
+## 📚 Documentation
+
+Comprehensive documentation is organized by category in the [`docs/`](docs/) folder:
+
+### 📖 **User Guides** ([`docs/user-guides/`](docs/user-guides/))
+- **[ML Wake Analysis Guide](docs/user-guides/ML_WAKE_ANALYSIS_GUIDE.md)** - Advanced wake analysis functions and methodology
+- **[Predictive Maintenance Features](docs/user-guides/PDM_CHATBOT_FEATURES.md)** - PdM chatbot and LLM integration
+- **[Fault Diagnosis with SHAP](docs/user-guides/FAULT_DIAGNOSIS_SHAP.md)** - Intelligent fault diagnosis system
+- **[LLM Integration Guide](docs/user-guides/README_LLM.md)** - Local LLM setup with OpenAI-compatible API 
+- **[Optimization Guide](docs/user-guides/README_Optimization.md)** - Wake steering optimization using PyTorch AutoDiff
+- **[RUL Inference Setup](docs/user-guides/README_INFERENCE.md)** - Fuhrlander FL2500 predictive maintenance
+- **[Predictive Maintenance Framework](docs/user-guides/WIND_TURBINE_PM_DOCUMENTATION.md)** - Complete PdM system documentation
+
+### 🔬 **Research Documentation** ([`docs/research/`](docs/research/))
+- **[Research Paper: Predictive Maintenance](docs/research/RESEARCH_PAPER_PM.md)** - Academic paper on semi-supervised ML framework
+- **[Fuhrlander Model Report](docs/research/FUHRLANDER_MODEL_REPORT.md)** - Model validation and performance metrics
+- **[SHAP Analysis Report](docs/research/SHAP_ANALYSIS_REPORT.md)** - Explainability analysis with per-sample explanations
+
+### ⚙️ **Setup & Configuration** ([`docs/setup/`](docs/setup/))
+- **[Agent 2B Setup](docs/setup/AGENT_2B_SETUP.md)** - LLM-based turbine expert configuration
+- **[Reviewer Agent Setup](docs/setup/REVIEWER_AGENT_SETUP.md)** - Expert reviewer agent with validation system
+- **[Package Installation Guide](docs/setup/readme_package.md)** - Prerequisites and uv package manager setup
 
 ---
 

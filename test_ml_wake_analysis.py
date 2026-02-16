@@ -51,8 +51,8 @@ def test_ml_wake_analysis():
         
         # Initialize wake agent
         print("Loading TT-OpInf wake flow model...")
-        model_dir = str(PROJECT_ROOT / "models" / "tt_opinf_model")
-        grid_path = str(PROJECT_ROOT / "data" / "Grid_data.vtk")
+        model_dir = str(SCRIPT_DIR / "models" / "tt_opinf_model")
+        grid_path = str(SCRIPT_DIR / "data" / "Grid_data.vtk")
         
         if not os.path.exists(model_dir):
             print(f"❌ Model not found at: {model_dir}")
