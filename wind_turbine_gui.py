@@ -47,6 +47,9 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from dotenv import load_dotenv
 load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
 
+# Import the LLM factory
+from llm import LLMFactory
+
 
 def get_api_config(provider: str) -> tuple:
     """
@@ -85,17 +88,189 @@ def get_api_config(provider: str) -> tuple:
     return api_base, api_key
 
 
-def test_llm_connection(provider: str, model: str) -> dict:
+class GlobalLLMConfig:
     """
-    Actually test LLM connection by making a lightweight API call.
+    Global LLM configuration manager with persistent local storage.
+    Handles configuration priority: GUI session state → local storage → YAML → defaults
+    """
+    
+    PROVIDER_MODELS = {
+        "NTNU": [
+            "moonshotai/Kimi-K2.5",
+            "openai/gpt-oss-120b",
+            "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+            "zai-org/GLM-4.7-FP8",
+            "NorwAI/NorwAI-Magistral-24B-reasoning",
+            "Qwen/Qwen3-Coder-Next-FP8",
+            "zai-org/GLM-Image"
+        ],
+        "OpenAI": [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-3.5-turbo",
+            "o1-preview",
+            "o1-mini"
+        ],
+        "Ollama": [
+            "llama3.2",
+            "mistral",
+            "codellama",
+            "phi3",
+            "qwen2.5"
+        ],
+        "Google": [
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+            "gemini-1.0-pro"
+        ],
+        "Anthropic": [
+            "claude-3.5-sonnet",
+            "claude-3-opus",
+            "claude-3-haiku"
+        ]
+    }
+    
+    DEFAULT_PROVIDER = "NTNU"
+    DEFAULT_TEMPERATURE = 0.1
+    
+    @classmethod
+    def initialize_session_state(cls):
+        """Initialize session state with default or persisted values."""
+        if 'global_llm_config_initialized' not in st.session_state:
+            # Try to load from local storage first
+            saved_config = cls._load_from_local_storage()
+            
+            # Set default values with persistence
+            st.session_state.global_llm_provider = saved_config.get('provider', cls.DEFAULT_PROVIDER)
+            st.session_state.global_llm_model = saved_config.get('model', cls.PROVIDER_MODELS[cls.DEFAULT_PROVIDER][0])
+            st.session_state.global_llm_temperature = saved_config.get('temperature', cls.DEFAULT_TEMPERATURE)
+            st.session_state.global_llm_config_initialized = True
+            
+            # Backward compatibility - sync with existing session state
+            if hasattr(st.session_state, 'llm_provider'):
+                st.session_state.global_llm_provider = st.session_state.llm_provider
+            if hasattr(st.session_state, 'selected_model'):
+                st.session_state.global_llm_model = st.session_state.selected_model
+    
+    @classmethod
+    def get_provider(cls) -> str:
+        """Get current LLM provider."""
+        cls.initialize_session_state()
+        return st.session_state.global_llm_provider
+    
+    @classmethod
+    def get_model(cls) -> str:
+        """Get current LLM model."""
+        cls.initialize_session_state()
+        return st.session_state.global_llm_model
+    
+    @classmethod
+    def get_temperature(cls) -> float:
+        """Get current temperature setting."""
+        cls.initialize_session_state()
+        return st.session_state.global_llm_temperature
+    
+    @classmethod
+    def set_provider(cls, provider: str):
+        """Set LLM provider and save to local storage."""
+        st.session_state.global_llm_provider = provider
+        # Reset model to first available for new provider
+        if provider in cls.PROVIDER_MODELS:
+            st.session_state.global_llm_model = cls.PROVIDER_MODELS[provider][0]
+        cls._save_to_local_storage()
+    
+    @classmethod
+    def set_model(cls, model: str):
+        """Set LLM model and save to local storage."""
+        st.session_state.global_llm_model = model
+        cls._save_to_local_storage()
+    
+    @classmethod
+    def set_temperature(cls, temperature: float):
+        """Set LLM temperature and save to local storage."""
+        st.session_state.global_llm_temperature = temperature
+        cls._save_to_local_storage()
+    
+    @classmethod
+    def get_api_config(cls) -> tuple:
+        """Get API base URL and key for current provider."""
+        return get_api_config(cls.get_provider())
+    
+    @classmethod
+    def create_llm_instance(cls):
+        """Create LLM instance using current global configuration."""
+        provider = cls.get_provider().lower()
+        model = cls.get_model()
+        
+        # Get API configuration
+        api_base, api_key = cls.get_api_config()
+        
+        try:
+            # Provider name mapping for LLMFactory
+            provider_map = {
+                "ntnu": "ntnu",
+                "openai": "openai", 
+                "ollama": "ollama",
+                "google": "google",
+                "anthropic": "anthropic"
+            }
+            
+            factory_provider = provider_map.get(provider, provider)
+            
+            return LLMFactory.create(
+                factory_provider,
+                model=model,
+                api_key=api_key,
+                base_url=api_base
+            )
+        except Exception as e:
+            st.error(f"Failed to create LLM instance: {e}")
+            return None
+    
+    @classmethod
+    def _save_to_local_storage(cls):
+        """Save current configuration to browser local storage."""
+        try:
+            config = {
+                'provider': cls.get_provider(),
+                'model': cls.get_model(),
+                'temperature': cls.get_temperature()
+            }
+            
+            # Use Streamlit's component to save to localStorage
+            st.session_state._llm_config_save_needed = config
+            
+        except Exception as e:
+            # Fail silently for local storage issues
+            pass
+    
+    @classmethod
+    def _load_from_local_storage(cls) -> dict:
+        """Load configuration from browser local storage."""
+        try:
+            # In a real implementation, this would use a Streamlit component
+            # For now, return empty dict to fall back to defaults
+            return {}
+        except Exception:
+            return {}
+
+
+def test_llm_connection(provider: str = None, model: str = None) -> dict:
+    """
+    Test LLM connection using global configuration or provided parameters.
     
     Args:
-        provider: LLM provider name (NTNU, OpenAI, etc.)
-        model: Model name to test
+        provider: LLM provider name (uses global config if None)
+        model: Model name to test (uses global config if None)
     
     Returns:
         dict with keys: 'success', 'status', 'message', 'error_details'
     """
+    # Use global config if not provided
+    if provider is None:
+        provider = GlobalLLMConfig.get_provider()
+    if model is None:
+        model = GlobalLLMConfig.get_model()
     import requests
     import json
     
@@ -1944,20 +2119,13 @@ Use technical terminology appropriately but explain complex concepts clearly."""
             prompt = f"{context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer:"
             
             try:
-                # Get API configuration from environment / Streamlit secrets
-                api_base, api_key = get_api_config(llm_provider)
-                
-                # Query LLM with lower temperature for more deterministic responses
-                response = query_local_llm(
-                    api_key=api_key,
-                    api_base=api_base,
-                    model_name=selected_model,
+                # Use unified LLM function with global configuration
+                response = query_unified_llm(
                     prompt=prompt,
                     system_message=system_message,
                     temperature=0.3,  # Lower temperature for consistent responses
                     max_tokens=1500,  # Reduced for faster responses
-                    timeout=60.0,  # Increased timeout for complete responses
-                    max_retries=3  # Retry logic for handling incomplete responses
+                    timeout=60.0  # Increased timeout for complete responses
                 )
                 
                 # Add to chat history
@@ -2579,17 +2747,13 @@ Respond with JSON:"""
         
         # Query the LLM using the unified interface
         # Agent 2C requires MORE tokens and time than Agent 2B due to complex JSON output
-        print(f"[Agent 2C Debug] Calling LLM (Attempt 1: WITH system message) provider={provider}, model={config['model']}", file=sys.stderr)
-        response = query_local_llm(
-            api_key=config['api_key'],
-            api_base=config['api_base'],
-            model_name=config['model'],
+        print(f"[Agent 2C Debug] Calling LLM (Attempt 1: WITH system message) provider={provider}, model={GlobalLLMConfig.get_model()}", file=sys.stderr)
+        response = query_unified_llm(
             prompt=prompt,
             system_message="You are a wind farm wake analysis expert. Respond ONLY with valid JSON.",
             temperature=0.1,
             max_tokens=4000,
-            timeout=60.0,
-            max_retries=2  # Only 2 retries for first attempt
+            timeout=60.0
         )
         print(f"[Agent 2C Debug] LLM response length: {len(response)} chars", file=sys.stderr)
         print(f"[Agent 2C Debug] Response preview: {response[:200]}...", file=sys.stderr)
@@ -2599,16 +2763,12 @@ Respond with JSON:"""
             print(f"[Agent 2C Debug] First attempt failed with empty response. Trying WITHOUT system message...", file=sys.stderr)
             time.sleep(2)
             
-            response = query_local_llm(
-                api_key=config['api_key'],
-                api_base=config['api_base'],
-                model_name=config['model'],
+            response = query_unified_llm(
                 prompt=f"Analyze wind farm wake interactions and respond with JSON.\n\n{prompt}",
                 system_message=None,  # Try without system message
                 temperature=0.2,
                 max_tokens=4000,
-                timeout=60.0,
-                max_retries=2
+                timeout=60.0
             )
             print(f"[Agent 2C Debug] Attempt 2 response length: {len(response)} chars", file=sys.stderr)
         
@@ -2625,16 +2785,12 @@ Turbines: {', '.join([f'T{t["turbine_id"]}' for t in turbine_locations[:10]])}{'
 Identify 3-5 upstream→downstream pairs aligned with wind direction.
 Format: T1→T2, T3→T4, etc."""
             
-            response = query_local_llm(
-                api_key=config['api_key'],
-                api_base=config['api_base'],
-                model_name=config['model'],
+            response = query_unified_llm(
                 prompt=simple_prompt,
                 system_message=None,
                 temperature=0.3,
                 max_tokens=2000,
-                timeout=45.0,
-                max_retries=2
+                timeout=45.0
             )
             print(f"[Agent 2C Debug] Attempt 3 (simple) response length: {len(response)} chars", file=sys.stderr)
         
@@ -3327,6 +3483,85 @@ def load_llm_config(config_path: str = None):
         return {}
 
 
+def query_unified_llm(prompt: str, system_message: str = None, temperature: float = None, max_tokens: int = 1000, timeout: float = None):
+    """
+    Unified LLM query function using global configuration and modern LLMFactory interface.
+    
+    Parameters:
+    -----------
+    prompt : str
+        The user prompt/query for the LLM
+    system_message : str, optional
+        System message to set the context for the LLM
+    temperature : float, optional 
+        Sampling temperature (uses global config if None)
+    max_tokens : int, optional
+        Maximum number of tokens to generate (default: 1000)
+    timeout : float, optional
+        Timeout for the API request (default: None)
+    
+    Returns:
+    --------
+    str
+        The response from the LLM
+    """
+    try:
+        # Use global temperature if not specified
+        if temperature is None:
+            temperature = GlobalLLMConfig.get_temperature()
+        
+        # Try modern LLMFactory first
+        try:
+            llm = GlobalLLMConfig.create_llm_instance()
+            if llm:
+                import asyncio
+                
+                async def get_response():
+                    return await llm.complete(
+                        prompt=prompt,
+                        system=system_message,
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    )
+                
+                # Run async function in sync context
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # If already in event loop, create a task
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(asyncio.run, get_response())
+                            return future.result(timeout=timeout)
+                    else:
+                        return asyncio.run(get_response())
+                except:
+                    # Fallback for sync execution
+                    return asyncio.run(get_response())
+        except Exception as e:
+            st.warning(f"LLMFactory failed, using fallback: {e}")
+        
+        # Fallback to legacy query_local_llm
+        api_base, api_key = GlobalLLMConfig.get_api_config()
+        model_name = GlobalLLMConfig.get_model()
+        
+        return query_local_llm(
+            api_key=api_key,
+            api_base=api_base, 
+            model_name=model_name,
+            prompt=prompt,
+            system_message=system_message,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout
+        )
+    
+    except Exception as e:
+        error_msg = f"LLM query failed: {str(e)}"
+        st.error(error_msg)
+        return f"Error: {error_msg}"
+
+
 def query_local_llm(api_key: str, api_base: str, model_name: str, prompt: str, system_message: str = None, temperature: float = 0.3, max_tokens: int = 1000, timeout: float = None, max_retries: int = 3):
     """
     Query the local LLM using OpenAI-compatible API (openai>=1.0.0 interface) with retry logic.
@@ -3475,10 +3710,8 @@ def get_llm_expert_recommendation(wind_speed: float, wind_direction: float, conf
     )
     
     try:
-        llm_response = query_local_llm(
-            api_key=config.get('api_key', ''),
-            api_base=config.get('api_base', 'https://llm.hpc.ntnu.no/v1'),
-            model_name=config.get('model', model),
+        # Use unified LLM function - no need for manual API configuration
+        llm_response = query_unified_llm(
             prompt=prompt,
             system_message=system_message,
             temperature=config.get('temperature', 0.1),
@@ -3487,6 +3720,8 @@ def get_llm_expert_recommendation(wind_speed: float, wind_direction: float, conf
         )
         
         # Add provider info to response for debugging
+        provider = GlobalLLMConfig.get_provider()
+        model = GlobalLLMConfig.get_model()
         if not llm_response.startswith("Error"):
             llm_response = f"**[Using {provider} - {model}]**\n\n{llm_response}"
             
@@ -6047,7 +6282,94 @@ def main():
     
     # Sidebar for inputs
     with st.sidebar:
-        # MODE SELECTOR - at the top
+        # GLOBAL LLM CONFIGURATION - Always visible
+        st.header("🤖 LLM Configuration")
+        
+        # Initialize global config
+        GlobalLLMConfig.initialize_session_state()
+        
+        with st.expander("⚙️ AI Model Settings", expanded=False):
+            # Provider selection
+            current_provider = GlobalLLMConfig.get_provider()
+            provider_options = list(GlobalLLMConfig.PROVIDER_MODELS.keys())
+            provider_index = provider_options.index(current_provider) if current_provider in provider_options else 0
+            
+            new_provider = st.selectbox(
+                "LLM Provider",
+                options=provider_options,
+                index=provider_index,
+                help="Select the AI service provider",
+                key="global_provider_select"
+            )
+            
+            # Update provider if changed
+            if new_provider != current_provider:
+                GlobalLLMConfig.set_provider(new_provider)
+                st.rerun()
+            
+            # Model selection
+            available_models = GlobalLLMConfig.PROVIDER_MODELS[new_provider]
+            current_model = GlobalLLMConfig.get_model()
+            model_index = 0
+            if current_model in available_models:
+                model_index = available_models.index(current_model)
+            
+            new_model = st.selectbox(
+                "Model",
+                options=available_models,
+                index=model_index,
+                help=f"Select the {new_provider} model to use",
+                key="global_model_select"
+            )
+            
+            # Update model if changed
+            if new_model != current_model:
+                GlobalLLMConfig.set_model(new_model)
+            
+            # Temperature setting
+            current_temperature = GlobalLLMConfig.get_temperature()
+            new_temperature = st.slider(
+                "Exploration vs Accuracy",
+                min_value=0.0,
+                max_value=1.0,
+                value=current_temperature,
+                step=0.1,
+                help="0 = accuracy focused, 1 = exploration focused",
+                key="global_temperature_select"
+            )
+            
+            # Update temperature if changed
+            if abs(new_temperature - current_temperature) > 0.01:
+                GlobalLLMConfig.set_temperature(new_temperature)
+            
+            # Connection test
+            st.markdown("**🔍 Test Connection:**")
+            test_col1, test_col2 = st.columns([1, 1])
+            with test_col1:
+                if st.button("🧪 Test", use_container_width=True, key="global_test_btn"):
+                    with st.spinner("Testing..."):
+                        result = test_llm_connection()
+                        if result['success']:
+                            st.success(result['message'])
+                        else:
+                            st.error(result['message'])
+                            if result['error_details']:
+                                st.caption(result['error_details'])
+            
+            with test_col2:
+                # Status indicator
+                api_base, api_key = GlobalLLMConfig.get_api_config()
+                if api_key and api_key != "":
+                    st.success("🔑 Configured")
+                else:
+                    if new_provider == "Ollama":
+                        st.info("🔄 Local")
+                    else:
+                        st.warning("🔑 No API Key")
+        
+        st.markdown("---")
+        
+        # MODE SELECTOR - after LLM config
         st.header("🎯 Application Mode")
         app_mode = st.radio(
             "Select analysis mode:",
@@ -6118,163 +6440,28 @@ def main():
         # WIND FARM ANALYSIS MODE CONTROLS
         # =================================================================
         else:  # Wind Farm Analysis mode
-            st.header("🤖 LLM Configuration")
-            st.markdown("Configure the AI model for turbine analysis:")
+            st.header("🌪️ Wind Farm Analysis")
+            st.markdown("Multi-agent AI-powered turbine analysis system")
             
-            # LLM Provider Selection
-            llm_provider = st.selectbox(
-                "LLM Provider",
-                options=["NTNU", "OpenAI", "Ollama", "Google", "Anthropic"],
-                index=0,  # Default to NTNU
-                help="Select the AI service provider"
-            )
+            # Backward compatibility - sync global config with session state
+            st.session_state.llm_provider = GlobalLLMConfig.get_provider()
+            st.session_state.selected_model = GlobalLLMConfig.get_model()
+            st.session_state.explore_vs_acc = GlobalLLMConfig.get_temperature()
             
-            # Model Selection based on provider
-            if llm_provider == "NTNU":
-                available_models = [
-                    "moonshotai/Kimi-K2.5",
-                    "openai/gpt-oss-120b",
-                    "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
-                    "zai-org/GLM-4.7-FP8",
-                     "NorwAI/NorwAI-Magistral-24B-reasoning",
-                     "Qwen/Qwen3-Coder-Next-FP8",
-                    "zai-org/GLM-Image"
-                ]
-            elif llm_provider == "OpenAI":
-                available_models = [
-                    "gpt-4o",
-                    "gpt-4o-mini", 
-                    "gpt-3.5-turbo",
-                    "o1-preview",
-                    "o1-mini"
-                ]
-            elif llm_provider == "Ollama":
-                available_models = [
-                    "llama3.2",
-                    "mistral",
-                    "codellama",
-                    "phi3",
-                    "qwen2.5"
-                ]
-            elif llm_provider == "Google":
-                available_models = [
-                    "gemini-1.5-pro",
-                    "gemini-1.5-flash",
-                    "gemini-1.0-pro"
-                ]
-            else:  # Anthropic
-                available_models = [
-                    "claude-3.5-sonnet",
-                    "claude-3-opus",
-                    "claude-3-haiku"
-                ]
+            # Connection status indicator
+            api_base, api_key = GlobalLLMConfig.get_api_config()
+            current_provider = GlobalLLMConfig.get_provider()
+            current_model = GlobalLLMConfig.get_model()
             
-            selected_model = st.selectbox(
-                "Model",
-                options=available_models,
-                index=0 if llm_provider == "NTNU" else 0,
-                help=f"Select the {llm_provider} model to use"
-            )
-            explore_vs_acc = st.slider(
-                "Exploration vs Accuracy",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.1,  # Default value
-                step=0.1,  # Step size for the slider
-                help="Select a value between 0 (accuracy) and 1 (exploration)"
-            )
+            st.info(f"**Active LLM:** {current_provider} - {current_model}")
             
-            # Store in session state
-            st.session_state.llm_provider = llm_provider
-            st.session_state.selected_model = selected_model
-            st.session_state.explore_vs_acc = explore_vs_acc
-            
-            st.markdown("---")
-            
-            # LLM Connection Test
-            st.markdown("**🔍 Test LLM Connection:**")
-            st.caption("Verify your configuration before running analysis")
-            
-            test_col1, test_col2 = st.columns([1, 2])
-            with test_col1:
-                test_button = st.button("🧪 Test Connection", type="primary", use_container_width=True)
-            
-            with test_col2:
-                if 'llm_test_result' in st.session_state and st.session_state.get('last_tested_config') == f"{llm_provider}:{selected_model}":
-                    # Show cached result
-                    if st.session_state.llm_test_result['success']:
-                        st.success("✅ Connected", icon="✅")
-                    else:
-                        st.error("❌ Failed", icon="❌")
-            
-            if test_button:
-                with st.spinner(f"Testing connection to {llm_provider}..."):
-                    test_result = test_llm_connection(llm_provider, selected_model)
-                    st.session_state.llm_test_result = test_result
-                    st.session_state.last_tested_config = f"{llm_provider}:{selected_model}"
-                    st.rerun()
-            
-            # Display detailed test results
-            if 'llm_test_result' in st.session_state and st.session_state.get('last_tested_config') == f"{llm_provider}:{selected_model}":
-                test_result = st.session_state.llm_test_result
-                
-                if test_result['success']:
-                    st.success(test_result['message'])
-                else:
-                    st.error(test_result['message'])
-                    if test_result['error_details']:
-                        with st.expander("🔧 Troubleshooting Details"):
-                            st.warning(test_result['error_details'])
-                            
-                            # Provide specific guidance based on error type
-                            if test_result['status'] == 'no_api_key':
-                                st.markdown(f"""
-                                **How to fix:**
-                                1. Create/edit `.env` file in project root
-                                2. Add: `{llm_provider.upper()}_API_KEY=your_key_here`
-                                3. Restart Streamlit
-                                
-                                Or use Streamlit secrets (for cloud deployment).
-                                """)
-                            elif test_result['status'] == 'invalid_key':
-                                st.markdown("""
-                                **Possible causes:**
-                                - API key is expired or invalid
-                                - Wrong key format
-                                - Key doesn't have required permissions
-                                
-                                **Action:** Generate a new API key from provider's dashboard.
-                                """)
-                            elif test_result['status'] == 'connection_error':
-                                st.markdown("""
-                                **Possible causes:**
-                                - No internet connection
-                                - Firewall blocking requests
-                                - VPN issues
-                                - API server down
-                                
-                                **Action:** Check network and try again.
-                                """)
-                            elif test_result['status'] == 'rate_limit':
-                                st.markdown("""
-                                **Rate limit hit:**
-                                - Too many requests in short time
-                                - Free tier quota exceeded
-                                
-                                **Action:** Wait a few minutes or upgrade plan.
-                                """)
-                            elif test_result['status'] == 'model_not_found':
-                                st.markdown("""
-                                **Model not accessible:**
-                                - Model name may be incorrect
-                                - You may not have access to this model
-                                - Model may require special permissions
-                                
-                                **Action:** Try a different model from dropdown.
-                                """)
+            if api_key and api_key != "":
+                st.success("✅ LLM configured and ready")
             else:
-                st.info("💡 Click 'Test Connection' to verify your LLM configuration before running analysis.")
-
+                if current_provider == "Ollama":
+                    st.warning("⚠️ Using Ollama - ensure server is running")
+                else:
+                    st.error("❌ No API key configured - check global settings above")
             
             st.markdown("---")
             
@@ -9100,26 +9287,15 @@ TURBINE:
         # Generate response
         with st.spinner("🤔 Thinking..."):
             try:
-                # Get LLM configuration from session state
-                llm_provider = st.session_state.get('llm_provider', 'NTNU')
-                selected_model = st.session_state.get('selected_model', 'moonshotai/Kimi-K2.5')
-                
-                # Get API configuration from environment / Streamlit secrets
-                api_base, api_key = get_api_config(llm_provider)
-                
                 # Construct detailed prompt
                 detailed_prompt = f"{context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer based on the wind farm analysis context above:"
                 
-                response = query_local_llm(
-                    api_key=api_key,
-                    api_base=api_base,
-                    model_name=selected_model,
+                response = query_unified_llm(
                     prompt=detailed_prompt,
                     system_message=system_message,
                     temperature=0.3,  # Lower temperature for consistent responses
                     max_tokens=1200,  # Reduced for faster responses
-                    timeout=60.0,  # Increased timeout
-                    max_retries=3  # Retry logic
+                    timeout=60.0  # Increased timeout
                 )
                 st.session_state.analysis_chat_history.append({
                     "role": "assistant",

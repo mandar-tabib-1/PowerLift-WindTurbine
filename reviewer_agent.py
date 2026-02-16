@@ -73,12 +73,20 @@ class WindTurbineReviewerAgent:
                 use_same_provider = reviewer_config.get("use_same_provider_as_agent2b", True)
                 
                 if use_same_provider:
-                    # Use same LLM as Agent 2B
-                    llm_config = config.get("llm", {})
-                    provider = "ntnu"  # Default provider
-                    model = llm_config.get("model", "moonshotai/Kimi-K2.5")
-                    api_key = llm_config.get("api_key", "")
-                    api_base = llm_config.get("api_base", "https://llm.hpc.ntnu.no/v1")
+                    # Import global config and use global LLM configuration
+                    try:
+                        from wind_turbine_gui import GlobalLLMConfig
+                        # Use global configuration if available
+                        provider = GlobalLLMConfig.get_provider().lower()
+                        model = GlobalLLMConfig.get_model()
+                        api_base, api_key = GlobalLLMConfig.get_api_config()
+                    except:
+                        # Fallback to config file
+                        llm_config = config.get("llm", {})
+                        provider = "ntnu"  # Default provider
+                        model = llm_config.get("model", "moonshotai/Kimi-K2.5")
+                        api_key = llm_config.get("api_key", "")
+                        api_base = llm_config.get("api_base", "https://llm.hpc.ntnu.no/v1")
                 else:
                     # Use dedicated reviewer config
                     provider = reviewer_config.get("provider", "ntnu")
@@ -94,7 +102,7 @@ class WindTurbineReviewerAgent:
                     provider=provider,
                     model=model,
                     api_key=api_key,
-                    api_base=api_base,
+                    base_url=api_base,
                     timeout=config.get("llm", {}).get("timeout", 300.0)
                 )
                 
