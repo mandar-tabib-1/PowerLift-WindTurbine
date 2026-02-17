@@ -6268,9 +6268,10 @@ def main():
     """, unsafe_allow_html=True)
     st.info(
                 "**Important Notes:**\n\n"
-                "1. **NTNU VPN Required:** To use the LLM model at NTNU, you must be connected to the NTNU VPN.\n\n"
-                "2. **Alternative Providers:** You can also try LLM with OpenAI or Anthropic using your own API key.\n\n"
-                "3. **API Key Privacy:** Your API keys should be stored in your local `.env` file and never shared."
+                "1. Yaw misalignment ML training is upto 15 degrees. Beyond this, results may be less accurate.\n"
+                "2. **NTNU VPN Required:** To use the LLM model at NTNU, you must be connected to the NTNU VPN.\n\n"
+                "3. **Alternative Providers:** You can also try LLM with OpenAI or Anthropic using your own API key.\n\n"
+                "4. **API Key Privacy:** Your API keys should be stored in your local `.env` file and never shared."
             )
     st.markdown("""
     <div class="info-box">          
@@ -6772,8 +6773,8 @@ def main():
                 elif whatif_wind_speed > 25.0:
                     st.error(f"⛔ Wind speed {whatif_wind_speed:.1f} m/s exceeds cut-out (25.0 m/s). Turbine will shut down.")
                 
-                if whatif_wind_direction < 270 or whatif_wind_direction > 285:
-                    st.info(f"ℹ️ Wind direction {whatif_wind_direction:.0f}° is outside ROM training range (270-285°). Results may be less accurate.")
+                #if whatif_wind_direction < 270 or whatif_wind_direction > 285:
+                    #st.info(f"ℹ️ Wind direction {whatif_wind_direction:.0f}° is outside ROM training range (270-285°). Results may be less accurate.")
                 
                 # Show preview
                 with st.expander("📊 Preview What-If Conditions"):
