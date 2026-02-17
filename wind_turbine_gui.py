@@ -133,24 +133,41 @@ class GlobalLLMConfig:
     DEFAULT_PROVIDER = "NTNU"
     DEFAULT_TEMPERATURE = 0.1
     
+    # Maps provider names to their environment variable key names
+    PROVIDER_API_KEY_NAMES = {
+        "NTNU": "NTNU_API_KEY",
+        "OpenAI": "OPENAI_API_KEY",
+        "Anthropic": "ANTHROPIC_API_KEY",
+        "Google": "GOOGLE_API_KEY",
+        "Ollama": None,  # No key needed
+    }
+
     @classmethod
     def initialize_session_state(cls):
         """Initialize session state with default or persisted values."""
         if 'global_llm_config_initialized' not in st.session_state:
             # Try to load from local storage first
             saved_config = cls._load_from_local_storage()
-            
+
             # Set default values with persistence
             st.session_state.global_llm_provider = saved_config.get('provider', cls.DEFAULT_PROVIDER)
             st.session_state.global_llm_model = saved_config.get('model', cls.PROVIDER_MODELS[cls.DEFAULT_PROVIDER][0])
             st.session_state.global_llm_temperature = saved_config.get('temperature', cls.DEFAULT_TEMPERATURE)
             st.session_state.global_llm_config_initialized = True
-            
+
+            # Initialize user-provided API keys dict
+            if 'user_api_keys' not in st.session_state:
+                st.session_state.user_api_keys = {}
+
             # Backward compatibility - sync with existing session state
             if hasattr(st.session_state, 'llm_provider'):
                 st.session_state.global_llm_provider = st.session_state.llm_provider
             if hasattr(st.session_state, 'selected_model'):
                 st.session_state.global_llm_model = st.session_state.selected_model
+
+        # Ensure user_api_keys exists even after config is initialized
+        if 'user_api_keys' not in st.session_state:
+            st.session_state.user_api_keys = {}
     
     @classmethod
     def get_provider(cls) -> str:
@@ -192,9 +209,33 @@ class GlobalLLMConfig:
         cls._save_to_local_storage()
     
     @classmethod
+    def set_user_api_key(cls, provider: str, api_key: str):
+        """Set a user-provided API key for a provider (stored in session only)."""
+        if 'user_api_keys' not in st.session_state:
+            st.session_state.user_api_keys = {}
+        st.session_state.user_api_keys[provider] = api_key
+
+    @classmethod
+    def get_user_api_key(cls, provider: str) -> str:
+        """Get user-provided API key for a provider, or empty string if none."""
+        if 'user_api_keys' not in st.session_state:
+            st.session_state.user_api_keys = {}
+        return st.session_state.user_api_keys.get(provider, "")
+
+    @classmethod
     def get_api_config(cls) -> tuple:
-        """Get API base URL and key for current provider."""
-        return get_api_config(cls.get_provider())
+        """Get API base URL and key for current provider.
+        Priority: user-provided key (GUI) → env/.env → Streamlit secrets
+        """
+        provider = cls.get_provider()
+        api_base, api_key = get_api_config(provider)
+
+        # Override with user-provided key from GUI if available
+        user_key = cls.get_user_api_key(provider)
+        if user_key:
+            api_key = user_key
+
+        return api_base, api_key
     
     @classmethod
     def create_llm_instance(cls):
@@ -274,15 +315,16 @@ def test_llm_connection(provider: str = None, model: str = None) -> dict:
     import requests
     import json
     
-    api_base, api_key = get_api_config(provider)
-    
+    # Use GlobalLLMConfig to pick up user-provided keys from GUI
+    api_base, api_key = GlobalLLMConfig.get_api_config()
+
     result = {
         'success': False,
         'status': 'unknown',
         'message': '',
         'error_details': ''
     }
-    
+
     # Check if API key exists
     if not api_key or api_key == "":
         if provider == "Ollama":
@@ -290,7 +332,7 @@ def test_llm_connection(provider: str = None, model: str = None) -> dict:
         else:
             result['status'] = 'no_api_key'
             result['message'] = f"❌ No API key found for {provider}"
-            result['error_details'] = "Configure API key in .env file or Streamlit secrets"
+            result['error_details'] = "Enter API key above, or configure in .env file / Streamlit secrets"
             return result
     
     try:
@@ -1985,6 +2027,83 @@ def display_fault_diagnosis(diagnosis):
             st.success('✅ All turbines are in healthy state. Continue routine monitoring.')
 
 
+def load_research_reports_context():
+    """
+    Load research report summaries from docs/research/*.tex files and build
+    a supplementary reference context string with citations for the LLM chatbots.
+    Returns a string that can be appended to existing context/system messages.
+    """
+    import os
+    import re
+
+    reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docs', 'research')
+
+    # Mapping of tex files to their citation references
+    report_refs = {
+        'technical_report_multiagent.tex': {
+            'citation': '[1] M. Tabib. "A Multi-Agent AI Framework Integrating Large Language Models and Machine Learning for Wind Turbine Predictive Maintenance and Wake Steering Optimisation". Technical Report, SINTEF Digital, 2026.',
+            'key': 'Tabib2026',
+            'topics': 'multi-agent framework, LLM integration, predictive maintenance, wake steering optimisation'
+        },
+        'gpr_power_prediction.tex': {
+            'citation': '[2] M. Tabib. "Gaussian Process Regression for Wind Turbine Rotor Power Prediction under Yaw Misalignment". Technical Report, SINTEF Digital, 2025a.',
+            'key': 'Tabib2025a',
+            'topics': 'Gaussian process regression, power prediction, yaw misalignment, rotor power'
+        },
+        'RESEARCH_PAPER_PM.tex': {
+            'citation': '[3] M. Tabib. "A Semi-Supervised Machine Learning Framework for Predictive Maintenance of Wind Turbine Gearbox Systems Using Real SCADA Data". Technical Report, SINTEF Digital, 2025b.',
+            'key': 'Tabib2025b',
+            'topics': 'semi-supervised learning, predictive maintenance, SCADA data, gearbox, autoencoder, GMM, SHAP, RUL'
+        },
+        'deepwind2026_tt_opinf.tex': {
+            'citation': '[4] M. Tabib. "Tensor Train Decomposition with Operator Inference for Parametric Wind Turbine Wake Flow Prediction". Technical Report, SINTEF Digital, 2025c.',
+            'key': 'Tabib2025c',
+            'topics': 'tensor train decomposition, operator inference, wake flow prediction, reduced-order model'
+        }
+    }
+
+    references_text = "\n\nSUPPLEMENTARY RESEARCH REFERENCES:\n"
+    references_text += "The following SINTEF technical reports provide additional background. "
+    references_text += "When your answer draws on methods, results, or concepts from these reports, "
+    references_text += "cite them using (Tabib, 2026), (Tabib, 2025a), (Tabib, 2025b), or (Tabib, 2025c). "
+    references_text += "At the end of your answer, list the full citations under a 'References' heading.\n\n"
+
+    for tex_file, ref_info in report_refs.items():
+        filepath = os.path.join(reports_dir, tex_file)
+        references_text += f"{ref_info['citation']}\n"
+
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+                # Extract abstract
+                abstract_match = re.search(
+                    r'\\begin\{abstract\}(.*?)\\end\{abstract\}',
+                    content, re.DOTALL
+                )
+                if abstract_match:
+                    abstract = abstract_match.group(1).strip()
+                    # Clean LaTeX commands
+                    abstract = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', abstract)
+                    abstract = re.sub(r'\\[a-zA-Z]+', '', abstract)
+                    abstract = re.sub(r'[{}~]', ' ', abstract)
+                    abstract = re.sub(r'\s+', ' ', abstract).strip()
+                    if len(abstract) > 600:
+                        abstract = abstract[:600] + '...'
+                    references_text += f"  Summary: {abstract}\n"
+
+                # Extract section titles
+                sections = re.findall(r'\\section\{([^}]+)\}', content)
+                if sections:
+                    references_text += f"  Sections: {', '.join(sections[:10])}\n"
+            except Exception:
+                pass
+        references_text += "\n"
+
+    return references_text
+
+
 def pdm_chatbot_section(pdm_results, models_dict):
     """
     Interactive chatbot for PdM analysis queries using LLM.
@@ -2115,8 +2234,11 @@ Provide clear, actionable answers based on the analysis context. Be specific abo
 - Industry best practices
 
 Use technical terminology appropriately but explain complex concepts clearly."""
-            
-            prompt = f"{context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer:"
+
+            # Load supplementary research report references
+            reports_context = load_research_reports_context()
+
+            prompt = f"{context}\n{reports_context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer:"
             
             try:
                 # Use unified LLM function with global configuration
@@ -2732,9 +2854,9 @@ Respond with JSON:"""
         print(f"[Agent 2C Debug] Analyzing {len(turbine_locations)} turbines", file=sys.stderr)
         print(f"[Agent 2C Debug] Wind conditions: {wind_speed}m/s from {wind_dir}°", file=sys.stderr)
         
-        # Get LLM configuration from environment / Streamlit secrets
-        api_base, api_key = get_api_config(provider)
-        
+        # Get LLM configuration (user-provided key → env → Streamlit secrets)
+        api_base, api_key = GlobalLLMConfig.get_api_config()
+
         config = {
             'provider': provider,
             'model': model,
@@ -3666,9 +3788,9 @@ def get_llm_expert_recommendation(wind_speed: float, wind_direction: float, conf
         provider = getattr(st.session_state, 'llm_provider', 'NTNU')
         model = getattr(st.session_state, 'selected_model', 'moonshotai/Kimi-K2.5')
         
-        # Get API configuration from environment / Streamlit secrets
-        api_base, api_key = get_api_config(provider)
-        
+        # Get API configuration (user-provided key → env → Streamlit secrets)
+        api_base, api_key = GlobalLLMConfig.get_api_config()
+
         config = {
             'provider': provider,
             'model': model,
@@ -6249,7 +6371,12 @@ def main():
 
     st.markdown("""
     <div class="info-box">
-    <b>Welcome!</b> This system involves developing/testing multiple agents involving AI to analyze wind turbine operations:
+    <b>Welcome!</b><br> 1. This system involves multiple agents (as cited below) involving ML/AI and LLMs to analyze wind turbine operations. <br> 2.This is an exploratory work and in development. <br> 3. </b>The ML models are trained on synthetic dataset and publicly available data by mandar.tabib@sintef.no at SINTEF DIGITAL</b>.  <br>
+    Regarding LLM: IF you want LLMs in this workflow as expert reviewers, as intelligent assistants or as turbine experts, <br> THEN expand the LLM Configuration section in the sidebar and select your provider/model! with your API KEY <br>
+    <br>Application Mode:  Select the APPLICATION MODE ON LEFT SIDEBAR: PREDICTIVE MAINTENANCE OR WIND FARM OPTIMIZATION. <br>
+        Wait For Models To Load When Selected - BOTH ML AND LLMS - This may Take a Few Moments 
+    <br> Scroll Down to see the details of your selection as there is no auto-scroll. <br>
+    
     <ul>
         <li><b>Agent 1:</b> Weather Station - Fetches real-time wind conditions</li>
         <li><b>Agent 2:</b> Turbine Experts-  A rule-based expert and the Large Language Models.</li>
@@ -6273,6 +6400,14 @@ def main():
                 "3. **Alternative Providers:** You can also try LLM with OpenAI or Anthropic using your own API key.\n\n"
                 "4. **API Key Privacy:** Your API keys should be stored in your local `.env` file and never shared."
             )
+    
+    st.info(
+               "**Internal reports (that will be published in peer-reviewed journals):**\n\n"   
+                "1.  A Multi-Agent AI Framework Integrating Large Language Models and Machine Learning for Wind Turbine Predictive Maintenance and Wake Steering Optimisation. M. Tabib. Technical Report, SINTEF Digital, 2026. mandar.tabib@sintef.no\n\n"
+                "2.  Gaussian process regression for wind turbine rotor power prediction under yaw misalignment. M. Tabib. Technical Report, SINTEF Digitala.\n\n"
+                "3.  A semi-supervised machine learning framework for predictive maintenance of wind turbine gearbox systems using real SCADA data. M. Tabib. Technical Report, SINTEF Digital. \n\n"
+                "4.  Tensor train decomposition with operator inference for parametric wind turbine wake flow prediction. M. Tabib. Technical Report,SINTEF Digital."
+                 )
     st.markdown("""
     <div class="info-box">          
      <b> Select a wind farm on the left sidebar for agents to start analysis!</b>
@@ -6342,8 +6477,42 @@ def main():
             # Update temperature if changed
             if abs(new_temperature - current_temperature) > 0.01:
                 GlobalLLMConfig.set_temperature(new_temperature)
-            
+
+            # API Key input - allow user to provide/override key from GUI
+            if new_provider != "Ollama":
+                st.markdown("---")
+                st.markdown("**🔑 API Key:**")
+
+                # Get the key from env/.env/secrets (pre-existing)
+                _, env_api_key = get_api_config(new_provider)
+                # Get any user-provided override
+                user_key = GlobalLLMConfig.get_user_api_key(new_provider)
+
+                # Determine the effective key and display state
+                effective_key = user_key if user_key else env_api_key
+
+                if effective_key and not user_key:
+                    # Key found from env - show masked with info
+                    masked = effective_key[:4] + "****" + effective_key[-4:] if len(effective_key) > 8 else "****"
+                    st.caption(f"Auto-detected from environment: `{masked}`")
+
+                key_name = GlobalLLMConfig.PROVIDER_API_KEY_NAMES.get(new_provider, "API_KEY")
+                new_user_key = st.text_input(
+                    f"{key_name}",
+                    value=user_key,
+                    type="password",
+                    placeholder="Enter API key or leave blank to use .env",
+                    help=f"Provide your {new_provider} API key here. It is stored in session memory only and never saved to disk.",
+                    key=f"api_key_input_{new_provider}"
+                )
+
+                # Update user key if changed
+                if new_user_key != user_key:
+                    GlobalLLMConfig.set_user_api_key(new_provider, new_user_key)
+                    st.rerun()
+
             # Connection test
+            st.markdown("---")
             st.markdown("**🔍 Test Connection:**")
             test_col1, test_col2 = st.columns([1, 1])
             with test_col1:
@@ -6356,7 +6525,7 @@ def main():
                             st.error(result['message'])
                             if result['error_details']:
                                 st.caption(result['error_details'])
-            
+
             with test_col2:
                 # Status indicator
                 api_base, api_key = GlobalLLMConfig.get_api_config()
@@ -6374,9 +6543,9 @@ def main():
         st.header("🎯 Application Mode")
         app_mode = st.radio(
             "Select analysis mode:",
-            options=[ "Predictive Maintenance","Wind Farm Analysis"],
+            options=[ "Predictive Maintenance","Wind Farm Optimization"],
             index=0 if st.session_state.app_mode == "Predictive Maintenance" else 1,
-            help="Choose between multi-agent wind farm analysis or predictive maintenance inference"
+            help="Choose between multi-agent wind farm optimization or predictive maintenance inference"
         )
         
         # Update session state
@@ -6438,11 +6607,11 @@ def main():
                     st.caption("Configure and run in main area →")
         
         # =================================================================
-        # WIND FARM ANALYSIS MODE CONTROLS
+        # WIND FARM OPTIMIZATION MODE CONTROLS
         # =================================================================
-        else:  # Wind Farm Analysis mode
-            st.header("🌪️ Wind Farm Analysis")
-            st.markdown("Multi-agent AI-powered turbine analysis system")
+        else:  # Wind Farm Optimization mode
+            st.header("🌪️ Wind Farm Optimization")
+            st.markdown("Multi-agent AI-powered turbine optimization system")
             
             # Backward compatibility - sync global config with session state
             st.session_state.llm_provider = GlobalLLMConfig.get_provider()
@@ -6966,8 +7135,8 @@ def main():
                 - **Models**: Autoencoder, GMM, GradientBoosting, RandomForest, LSTM
                 """)
     
-    # Handle Wind Farm Analysis Mode
-    elif st.session_state.app_mode == "Wind Farm Analysis":
+    # Handle Wind Farm Optimization Mode
+    elif st.session_state.app_mode == "Wind Farm Optimization":
         # =========================================================================
         # TURBINE LOCATION MAP SECTION
         # =========================================================================
@@ -9288,8 +9457,9 @@ TURBINE:
         # Generate response
         with st.spinner("🤔 Thinking..."):
             try:
-                # Construct detailed prompt
-                detailed_prompt = f"{context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer based on the wind farm analysis context above:"
+                # Construct detailed prompt with supplementary research references
+                reports_context = load_research_reports_context()
+                detailed_prompt = f"{context}\n{reports_context}\n\nUser Question: {user_question}\n\nProvide a detailed, technical answer based on the wind farm analysis context above:"
                 
                 response = query_unified_llm(
                     prompt=detailed_prompt,

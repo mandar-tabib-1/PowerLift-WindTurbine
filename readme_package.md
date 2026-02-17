@@ -1,10 +1,13 @@
-# PowerLift: Multi-Agent Wind Turbine Analysis System
+# Wind Turbine Multi-Agent AI Analysis System
 
-A physics-informed machine learning system for wind turbine power prediction and wake flow simulation, developed at **SINTEF Digital**, Norway.
-
-The system coordinates specialized ML algorithms and Large Language models in an agentic framework to deliver real-time turbine operation recommendations, power optimization, and 3D wake flow visualization through a Streamlit web interface.
+🌀 **Advanced wind turbine analysis and optimization using multiple AI agents for predictive maintenance and farm optimization**
 
 *Developed by mandar.tabib@sintef.no*
+
+## Overview
+This system integrates multiple AI agents and Large Language models for wind turbine operations analysis. It is an exploratory work and has potential for developments.
+
+The system coordinates specialized ML algorithms and Large Language models in an agentic framework to deliver real-time turbine operation recommendations, predictive maintenance, power optimization, and 3D wake flow visualization.
 
 ---
 
