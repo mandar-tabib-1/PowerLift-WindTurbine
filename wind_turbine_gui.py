@@ -6371,7 +6371,7 @@ def main():
 
     st.markdown("""
     <div class="info-box">
-    <b>Welcome!</b><br> 1. This system involves multiple agents (as cited below) involving ML/AI and LLMs to analyze wind turbine operations. <br> 2.This is an exploratory work and in development. <br> 3. </b>The ML models are trained on synthetic dataset and publicly available data by mandar.tabib@sintef.no at SINTEF DIGITAL</b>.  <br>
+    <b>Welcome!</b><br> 1. This system involves multiple agents (as cited below) involving ML/AI and LLMs to analyze wind turbine operations. <br> 2.This is a exploratory scientific research work. <br> 3. </b>The ML models are trained on simulation dataset and on publicly available data by mandar.tabib@sintef.no at SINTEF DIGITAL</b>.  <br>
     Regarding LLM: IF you want LLMs in this workflow as expert reviewers, as intelligent assistants or as turbine experts, <br> THEN expand the LLM Configuration section in the sidebar and select your provider/model! with your API KEY <br>
     <br>Application Mode:  Select the APPLICATION MODE ON LEFT SIDEBAR: PREDICTIVE MAINTENANCE OR WIND FARM OPTIMIZATION. <br>
         Wait For Models To Load When Selected - BOTH ML AND LLMS - This may Take a Few Moments 
