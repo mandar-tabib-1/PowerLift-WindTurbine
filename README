@@ -1,0 +1,22 @@
+Deployment Link for use: Agentic Framework Deployed on streamlit for public use -  https://agenticwindfarm.streamlit.app/   . Give some time to load , if it does not load or if you need more information then contact mandar.tabib@sintef.no.
+
+Code: the code behind the above streamlit has been made private now using a backup Github as i am looking to publish the following results. Follwing reports:    
+
+Internal reports (that will be published in peer-reviewed journals):
+- A Multi-Agent AI Framework Integrating Large Language Models and Machine Learning for Wind Turbine Predictive Maintenance and Wake Steering Optimisation. M. Tabib. Technical Report, SINTEF Digital, 2026. mandar.tabib@sintef.no
+- Gaussian process regression for wind turbine rotor power prediction under yaw misalignment. M. Tabib. Technical Report, SINTEF Digitala.
+- A semi-supervised machine learning framework for predictive maintenance of wind turbine gearbox systems using real SCADA data. M. Tabib. Technical Report, SINTEF Digital.
+- Tensor train decomposition with operator inference for parametric wind turbine wake flow prediction. M. Tabib. Technical Report,SINTEF Digital.
+
+Regarding Agents used in Streamlit:
+This system involves multiple agents (as cited below) involving ML/AI and LLMs to analyze wind turbine operations.
+Agent 1: Weather Station - Fetches real-time wind conditions
+Agent 2: Turbine Experts- A rule-based expert and the Large Language Models.
+ Agent 2A: Symbolic Rule-based Turbine Expert - Uses predefined rules for turbine analysis
+ Agent 2B: LLM-based Turbine Expert - Uses local LLM for intelligent recommendations
+ Agent 2C: Turbine Pair Selector - Rule-based to identify critical turbine pairs for wake optimization
+ Agent 2D: LLM Turbine Pair Selector - LLM to identify critical turbine pairs for wake optimization
+Agent 3: Optimizer Agent: Two-Turbine Wake Steering Optimizer - Finds optimal yaw misalignment for farm power maximization
+Agent 4: Flow AI Agent: Wind Turbine Flow ROM Agent - Unsupervised Tensor Train Decomposition + Operator Inference model at SINTEF Digital by mandar
+Agent 5: Power AI - Gaussian Process Regressor trained at SINTEF Digital, Mandar.
+Agent 6: Predictive Maintenance AI Agent - A Semi-Supervised Learning Model for Health Indicator and RUL involving Autoencoder , Gaussian Mixture Model and Recurrent Neural Network.
